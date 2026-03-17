@@ -1,0 +1,119 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+/* Matrix Theme - Dark terminal aesthetic */
+:root {
+  --background: #0a0a0a;
+  --foreground: #00ff41;
+  --card: #0d0d0d;
+  --card-foreground: #00ff41;
+  --popover: #0d0d0d;
+  --popover-foreground: #00ff41;
+  --primary: #00ff41;
+  --primary-foreground: #0a0a0a;
+  --secondary: #003b00;
+  --secondary-foreground: #00ff41;
+  --muted: #1a1a1a;
+  --muted-foreground: #00cc33;
+  --accent: #003b00;
+  --accent-foreground: #00ff41;
+  --destructive: #ff0040;
+  --destructive-foreground: #ffffff;
+  --border: #00401a;
+  --input: #0d1a0d;
+  --ring: #00ff41;
+  --matrix-glow: #00ff41;
+  --matrix-dim: #003b00;
+  --matrix-bright: #39ff14;
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --font-sans: 'Geist', 'Geist Fallback';
+  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-matrix-glow: var(--matrix-glow);
+  --color-matrix-dim: var(--matrix-dim);
+  --color-matrix-bright: var(--matrix-bright);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Shake animation for error state */
+@keyframes shake {
+
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+
+  10%,
+  30%,
+  50%,
+  70%,
+  90% {
+    transform: translateX(-4px);
+  }
+
+  20%,
+  40%,
+  60%,
+  80% {
+    transform: translateX(4px);
+  }
+}
+
+.animate-shake {
+  animation: shake 0.5s cubic-bezier(.36, .07, .19, .97) both;
+}
+
+/* Custom scrollbar for matrix theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #003b00;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #00ff41;
+}
