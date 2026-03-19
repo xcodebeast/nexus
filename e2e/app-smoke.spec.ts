@@ -44,3 +44,25 @@ test("authenticates and synchronizes room presence between two clients", async (
   await aliceContext.close();
   await bobContext.close();
 });
+
+test("shows a clear error when microphone APIs are unavailable", async ({
+  browser,
+}) => {
+  const context = await browser.newContext();
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: undefined,
+    });
+  });
+
+  const page = await context.newPage();
+
+  await login(page, "Alice");
+  await expect(
+    page.getByText(/microphone access (requires https or localhost|is unavailable)/i),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /disconnect/i })).toBeVisible();
+
+  await context.close();
+});

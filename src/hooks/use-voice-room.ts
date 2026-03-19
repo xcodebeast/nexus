@@ -21,6 +21,18 @@ function sortUsers(users: RoomUser[]) {
   return [...users].sort((left, right) => left.connectedAt - right.connectedAt);
 }
 
+function getMicrophoneUnavailableMessage() {
+  const isLocalhost =
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1";
+
+  if (!window.isSecureContext && !isLocalhost) {
+    return "Microphone access requires HTTPS or localhost.";
+  }
+
+  return "Microphone access is unavailable in this browser.";
+}
+
 export function useVoiceRoom() {
   const [users, setUsers] = useState<RoomUser[]>([]);
   const [isMuted, setIsMuted] = useState(false);
@@ -407,6 +419,10 @@ export function useVoiceRoom() {
       try {
         setConnectionState("requesting-media");
         setError(null);
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error(getMicrophoneUnavailableMessage());
+        }
 
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {

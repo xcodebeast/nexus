@@ -41,6 +41,8 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
     await onDisconnect();
   };
 
+  const muteDisabled = connectionState === "disconnected";
+
   return (
     <div className="flex flex-col items-center justify-center min-h-screen px-4 py-8">
       <div className="text-center mb-8 animate-in fade-in slide-in-from-top-4 duration-700">
@@ -71,6 +73,7 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
       <div className="flex gap-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300">
         <Button
           onClick={toggleMute}
+          disabled={muteDisabled}
           variant={isMuted ? "destructive" : "outline"}
           className={`
             font-mono uppercase tracking-wider px-6 transition-all duration-300

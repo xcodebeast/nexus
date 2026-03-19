@@ -94,6 +94,8 @@ Compose reads local environment variables and wires the service to port `3000` b
 
 WebSockets handle room state and WebRTC offer/answer/ICE exchange. Audio does not flow through the Bun server.
 
+Microphone access requires a secure context in the browser. Use HTTPS in deployed environments, or `localhost` during development.
+
 ## Environment
 
 Optional environment variables:
