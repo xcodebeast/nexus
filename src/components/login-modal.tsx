@@ -15,17 +15,16 @@ import {
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onLogin: (username: string) => void;
+  onLogin: (username: string, password: string) => Promise<void>;
   savedUsername: string | null;
 }
-
-const CORRECT_PASSWORD = "nexus"; // Mock password for demo
 
 export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginModalProps) {
   const [username, setUsername] = useState(savedUsername || "");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [shake, setShake] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     if (savedUsername) {
@@ -33,25 +32,40 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
     }
   }, [savedUsername]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const triggerError = (message: string) => {
+    setErrorMessage(message);
+    setShake(true);
+    setTimeout(() => {
+      setShake(false);
+    }, 500);
+    setTimeout(() => {
+      setErrorMessage(null);
+    }, 1500);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (password === CORRECT_PASSWORD && username.trim()) {
-      // Store username in localStorage
-      localStorage.setItem("nexus-username", username.trim());
-      onLogin(username.trim());
+
+    const nextUsername = username.trim();
+    if (!nextUsername) {
+      triggerError("ACCESS DENIED - Username required");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      await onLogin(nextUsername, password);
       setPassword("");
-      setError(false);
-    } else {
-      // Error animation
-      setError(true);
-      setShake(true);
-      setTimeout(() => {
-        setShake(false);
-      }, 500);
-      setTimeout(() => {
-        setError(false);
-      }, 1500);
+      setErrorMessage(null);
+    } catch (cause) {
+      triggerError(
+        cause instanceof Error
+          ? cause.message
+          : "ACCESS DENIED - Invalid credentials",
+      );
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -62,10 +76,10 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
           bg-card/95 border-primary/30 backdrop-blur-md
           transition-all duration-300
           ${shake ? "animate-shake" : ""}
-          ${error ? "border-destructive shadow-[0_0_30px_rgba(255,0,64,0.3)]" : "shadow-[0_0_30px_rgba(0,255,65,0.2)]"}
+          ${errorMessage ? "border-destructive shadow-[0_0_30px_rgba(255,0,64,0.3)]" : "shadow-[0_0_30px_rgba(0,255,65,0.2)]"}
         `}
         style={{
-          filter: error ? "blur(1px)" : "none",
+          filter: errorMessage ? "blur(1px)" : "none",
         }}
       >
         <DialogHeader>
@@ -88,6 +102,7 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
+                disabled={isSubmitting}
                 className="bg-input border-primary/30 text-primary font-mono placeholder:text-muted-foreground/50 focus:border-primary focus:ring-primary/20"
                 placeholder="Enter username..."
                 autoComplete="off"
@@ -110,26 +125,32 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              disabled={isSubmitting}
               className={`
                 bg-input border-primary/30 text-primary font-mono placeholder:text-muted-foreground/50 
                 focus:border-primary focus:ring-primary/20
-                ${error ? "border-destructive bg-destructive/10" : ""}
+                ${errorMessage ? "border-destructive bg-destructive/10" : ""}
               `}
               placeholder="Enter password..."
               autoComplete="off"
             />
-            {error && (
+            {errorMessage && (
               <p className="text-destructive text-xs font-mono animate-pulse">
-                ACCESS DENIED - Invalid credentials
+                {errorMessage}
               </p>
             )}
           </div>
           
           <Button 
             type="submit" 
+            disabled={isSubmitting}
             className="w-full bg-primary text-primary-foreground hover:bg-primary/90 font-mono uppercase tracking-wider transition-all duration-300 hover:shadow-[0_0_20px_rgba(0,255,65,0.4)]"
           >
-            {">"} Authenticate
+            {isSubmitting ? (
+              <>{">"} Connecting...</>
+            ) : (
+              <>{">"} Authenticate</>
+            )}
           </Button>
           
           <p className="text-xs text-muted-foreground/60 font-mono text-center">

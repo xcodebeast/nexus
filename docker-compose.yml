@@ -1,0 +1,23 @@
+services:
+  nexus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      NEXUS_PASSWORD: ${NEXUS_PASSWORD:-nexus}
+      NEXUS_PASSWORD_HASH: ${NEXUS_PASSWORD_HASH:-}
+      NEXUS_ROOM_ID: ${NEXUS_ROOM_ID:-main}
+      NEXUS_STUN_URLS: ${NEXUS_STUN_URLS:-stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302}
+      NEXUS_TURN_URLS: ${NEXUS_TURN_URLS:-}
+      NEXUS_TURN_USERNAME: ${NEXUS_TURN_USERNAME:-}
+      NEXUS_TURN_CREDENTIAL: ${NEXUS_TURN_CREDENTIAL:-}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s

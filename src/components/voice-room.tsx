@@ -1,83 +1,73 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
+import { useVoiceRoom } from "@/hooks/use-voice-room";
 import { VoiceAvatar } from "./voice-avatar";
-
-interface User {
-  id: string;
-  username: string;
-  isSpeaking: boolean;
-  isMuted: boolean;
-}
 
 interface VoiceRoomProps {
   currentUser: string;
-  onDisconnect: () => void;
+  onDisconnect: () => Promise<void> | void;
 }
 
-// Mock users for design testing
-const MOCK_USERS: User[] = [
-  { id: "1", username: "Neo", isSpeaking: false, isMuted: false },
-  { id: "2", username: "Trinity", isSpeaking: false, isMuted: true },
-  { id: "3", username: "Morpheus", isSpeaking: false, isMuted: false },
-];
+function getStatusLabel(connectionState: string) {
+  if (connectionState === "requesting-media") {
+    return "Requesting microphone access";
+  }
+
+  if (connectionState === "connecting") {
+    return "Establishing realtime channel";
+  }
+
+  if (connectionState === "disconnected") {
+    return "Realtime channel offline";
+  }
+
+  return "Voice channel active";
+}
 
 export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
-  const [users, setUsers] = useState<User[]>([
-    { id: "current", username: currentUser, isSpeaking: false, isMuted: false },
-    ...MOCK_USERS,
-  ]);
-  const [isMuted, setIsMuted] = useState(false);
+  const {
+    users,
+    selfUserId,
+    isMuted,
+    connectionState,
+    error,
+    toggleMute,
+    disconnect,
+  } = useVoiceRoom();
 
-  // Simulate random speaking activity
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setUsers((prev) =>
-        prev.map((user) => ({
-          ...user,
-          isSpeaking: !user.isMuted && Math.random() > 0.7,
-        }))
-      );
-    }, 800);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  const toggleMute = () => {
-    setIsMuted(!isMuted);
-    setUsers((prev) =>
-      prev.map((user) =>
-        user.id === "current" ? { ...user, isMuted: !isMuted } : user
-      )
-    );
+  const handleDisconnect = async () => {
+    await disconnect();
+    await onDisconnect();
   };
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen px-4 py-8">
-      {/* Header */}
       <div className="text-center mb-8 animate-in fade-in slide-in-from-top-4 duration-700">
         <h1 className="text-2xl sm:text-3xl font-mono font-bold text-primary tracking-wider mb-2">
           NEXUS
         </h1>
         <p className="text-xs sm:text-sm font-mono text-muted-foreground">
-          Voice Channel Active - {users.length} connected
+          {getStatusLabel(connectionState)} - {users.length} connected
         </p>
+        {error && (
+          <p className="mt-3 text-xs font-mono text-destructive">{error}</p>
+        )}
       </div>
 
-      {/* Users Grid */}
       <div className="flex flex-wrap justify-center gap-6 sm:gap-8 max-w-md mb-12 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150">
         {users.map((user) => (
           <VoiceAvatar
             key={user.id}
-            username={user.username}
+            username={
+              user.id === selfUserId ? `${currentUser} (YOU)` : user.username
+            }
             isSpeaking={user.isSpeaking}
             isMuted={user.isMuted}
           />
         ))}
       </div>
 
-      {/* Controls */}
       <div className="flex gap-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300">
         <Button
           onClick={toggleMute}
@@ -138,7 +128,7 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
         </Button>
 
         <Button
-          onClick={onDisconnect}
+          onClick={() => void handleDisconnect()}
           variant="outline"
           className="font-mono uppercase tracking-wider px-6 border-destructive/50 text-destructive hover:bg-destructive/10 hover:border-destructive transition-all duration-300"
         >
@@ -161,7 +151,6 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
         </Button>
       </div>
 
-      {/* Footer */}
       <div className="absolute bottom-4 text-center animate-in fade-in duration-1000 delay-500">
         <p className="text-[10px] font-mono text-muted-foreground/40">
           NEXUS v1.0 - Open Source Voice Communication
