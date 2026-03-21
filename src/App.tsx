@@ -121,7 +121,7 @@ export function App() {
         <div className="absolute inset-0 flex items-center justify-center z-10">
           <div className="text-center animate-pulse">
             <h1 className="text-4xl sm:text-6xl font-mono font-bold text-primary tracking-[0.3em] drop-shadow-[0_0_20px_rgba(0,255,65,0.8)]">
-              NEXUS
+              {appConfig.appName}
             </h1>
           </div>
         </div>
@@ -133,7 +133,7 @@ export function App() {
             <h1 
               className="text-4xl sm:text-6xl font-mono font-bold text-primary tracking-[0.3em] mb-8 animate-in fade-in slide-in-from-top-4 duration-700 drop-shadow-[0_0_15px_rgba(0,255,65,0.6)]"
             >
-              NEXUS
+             {appConfig.appName} 
             </h1>
             <Button
               onClick={handleConnect}
@@ -144,7 +144,7 @@ export function App() {
                 transition-all duration-500
                 shadow-[0_0_20px_rgba(0,255,65,0.3)]
                 hover:shadow-[0_0_40px_rgba(0,255,65,0.6)]
-                animate-in fade-in zoom-in-95 duration-700 delay-300
+                animate-in fade-in zoom-in-95
               "
             >
               {">"} Connect
