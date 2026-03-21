@@ -343,6 +343,22 @@ function broadcastScreenShareState() {
   });
 }
 
+function canRelayScreenSignal(
+  fromUserId: string,
+  targetUserId: string,
+  signal: WebRtcSignal,
+) {
+  if (!activeScreenShareUserId) {
+    return false;
+  }
+
+  if (fromUserId === activeScreenShareUserId) {
+    return targetUserId !== activeScreenShareUserId && signal.type !== "answer";
+  }
+
+  return targetUserId === activeScreenShareUserId && signal.type !== "offer";
+}
+
 function removeParticipant(
   sessionId: string,
   closingSocket?: ServerWebSocket<SocketData>,
@@ -591,11 +607,15 @@ const server = serve<SocketData>({
         return;
       }
 
-      if (event.channel === "screen" && activeScreenShareUserId !== session.id) {
+      if (
+        event.channel === "screen" &&
+        !canRelayScreenSignal(session.id, event.targetUserId, event.signal)
+      ) {
         ws.send(
           JSON.stringify({
             type: "error",
-            message: "Only the active presenter can send screen sharing signals.",
+            message:
+              "Screen sharing signals must be exchanged with the active presenter.",
           } satisfies ServerEvent),
         );
         return;

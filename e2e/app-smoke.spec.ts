@@ -163,9 +163,14 @@ async function expectNoScreenStageVideo(page: Page) {
 }
 
 async function expectScreenShareIdle(page: Page) {
-  await expect(page.getByText(/Presenter: none/i)).toBeVisible();
   await expect(page.getByTestId("screen-stage")).toHaveCount(0);
   await expectNoScreenStageVideo(page);
+}
+
+async function expectNoScreenSignalError(page: Page) {
+  await expect(
+    page.getByText(/screen sharing signals must be exchanged with the active presenter\./i),
+  ).toHaveCount(0);
 }
 
 async function expectLocalScreenTrackState(
@@ -518,6 +523,8 @@ test("starts a screen share and renders the inline stage for local and remote vi
   await expectScreenStageVideo(alicePage, "Alice");
   await expectScreenStageVideo(bobPage, "Alice");
   await expectLocalScreenTrackState(alicePage, "live");
+  await expectNoScreenSignalError(alicePage);
+  await expectNoScreenSignalError(bobPage);
 
   await aliceContext.close();
   await bobContext.close();
@@ -544,6 +551,8 @@ test("hands screen share ownership to the latest presenter", async ({
   await expectLocalScreenTrackState(alicePage, "ended");
   await expect(alicePage.getByText(/Screen Share: Alice/i)).toHaveCount(0);
   await expect(bobPage.getByText(/Screen Share: Alice/i)).toHaveCount(0);
+  await expectNoScreenSignalError(alicePage);
+  await expectNoScreenSignalError(bobPage);
 
   await aliceContext.close();
   await bobContext.close();

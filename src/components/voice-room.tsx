@@ -60,6 +60,11 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
     screenShareStatus === "requesting" ||
     screenShareStatus === "starting" ||
     screenShareStatus === "stopping";
+  const screenShareButtonLabel = isSelfPresenting
+    ? "Stop Sharing"
+    : activeScreenShareUserId
+      ? "Take Over Share"
+      : "Share Screen";
   const presenterStatus = activePresenterName
     ? `Presenter: ${activePresenterName}${isSelfPresenting ? " (YOU)" : ""}`
     : "";
@@ -132,6 +137,7 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
       <div className="flex flex-wrap justify-center gap-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300">
         <Button
           onClick={toggleMute}
+          aria-label={isMuted ? "Unmute microphone" : "Mute microphone"}
           disabled={muteDisabled}
           variant={isMuted ? "destructive" : "outline"}
           className={`
@@ -148,6 +154,7 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
 
         <Button
           onClick={() => void handleScreenShareAction()}
+          aria-label={screenShareButtonLabel}
           disabled={screenShareDisabled}
           variant={isSelfPresenting ? "destructive" : "outline"}
           className={`
@@ -164,6 +171,7 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
 
         <Button
           onClick={() => void handleDisconnect()}
+          aria-label="Disconnect"
           variant="outline"
           className="font-mono uppercase tracking-wider px-6 border-destructive/50 text-destructive hover:bg-destructive/10 hover:border-destructive transition-all duration-300"
         >
