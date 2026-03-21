@@ -3,6 +3,7 @@ import type {
   ClientEvent,
   RoomUser,
   ServerEvent,
+  SignalChannel,
   WebRtcSignal,
 } from "@/lib/protocol";
 
@@ -11,6 +12,14 @@ type ConnectionState =
   | "connecting"
   | "connected"
   | "disconnected";
+
+type ScreenShareStatus =
+  | "unsupported"
+  | "idle"
+  | "requesting"
+  | "starting"
+  | "sharing"
+  | "stopping";
 
 function buildWebSocketUrl(pathname: string) {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -54,19 +63,70 @@ function getMicrophoneUnavailableMessage() {
   return "Microphone access is unavailable in this browser.";
 }
 
+function supportsScreenShare() {
+  return Boolean(navigator.mediaDevices?.getDisplayMedia);
+}
+
+function getInitialScreenShareStatus(): ScreenShareStatus {
+  if (typeof navigator === "undefined") {
+    return "idle";
+  }
+
+  return supportsScreenShare() ? "idle" : "unsupported";
+}
+
+function getScreenShareUnavailableMessage() {
+  return "Screen sharing is available in desktop Chromium browsers with display capture support.";
+}
+
+function getScreenShareCancelledMessage() {
+  return "Screen sharing was cancelled before it started.";
+}
+
+function getScreenShareFailedMessage() {
+  return "Screen sharing could not start. Try again.";
+}
+
+function getScreenShareConnectionFailedMessage() {
+  return "Screen share connection failed. Ask the presenter to restart sharing.";
+}
+
+function getScreenShareNotReadyMessage() {
+  return "Realtime connection is not ready for screen sharing yet.";
+}
+
 export function useVoiceRoom() {
+  const initialScreenShareStatus = getInitialScreenShareStatus();
   const [users, setUsers] = useState<RoomUser[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("requesting-media");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [activeScreenShareUserId, setActiveScreenShareUserId] = useState<
+    string | null
+  >(null);
+  const [screenShareStatus, setScreenShareStatus] = useState<ScreenShareStatus>(
+    initialScreenShareStatus,
+  );
+  const [screenShareError, setScreenShareError] = useState<string | null>(null);
+  const [screenShareNotice, setScreenShareNotice] = useState<string | null>(
+    null,
+  );
+  const [activeScreenStream, setActiveScreenStream] =
+    useState<MediaStream | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const selfUserIdRef = useRef<string | null>(null);
+  const usersRef = useRef<RoomUser[]>([]);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const localScreenStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
+  const screenPeerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const pendingIceCandidatesRef = useRef(
+    new Map<string, RTCIceCandidateInit[]>(),
+  );
+  const pendingScreenIceCandidatesRef = useRef(
     new Map<string, RTCIceCandidateInit[]>(),
   );
   const audioElementsRef = useRef(new Map<string, HTMLAudioElement>());
@@ -81,6 +141,33 @@ export function useVoiceRoom() {
   const hasTurnRelayRef = useRef(false);
   const failedPeersRef = useRef(new Set<string>());
   const blockedAudioPeersRef = useRef(new Set<string>());
+  const activeScreenShareUserIdRef = useRef<string | null>(null);
+  const screenShareStatusRef =
+    useRef<ScreenShareStatus>(initialScreenShareStatus);
+  const activeScreenStreamRef = useRef<MediaStream | null>(null);
+
+  function setUsersState(nextUsers: RoomUser[]) {
+    usersRef.current = nextUsers;
+    setUsers(nextUsers);
+  }
+
+  function setUsersWithUpdater(updater: (users: RoomUser[]) => RoomUser[]) {
+    setUsers((previousUsers) => {
+      const nextUsers = updater(previousUsers);
+      usersRef.current = nextUsers;
+      return nextUsers;
+    });
+  }
+
+  function setScreenShareStatusState(nextStatus: ScreenShareStatus) {
+    screenShareStatusRef.current = nextStatus;
+    setScreenShareStatus(nextStatus);
+  }
+
+  function setActiveScreenStreamState(stream: MediaStream | null) {
+    activeScreenStreamRef.current = stream;
+    setActiveScreenStream(stream);
+  }
 
   function sendEvent(event: ClientEvent) {
     const ws = wsRef.current;
@@ -91,8 +178,21 @@ export function useVoiceRoom() {
     ws.send(JSON.stringify(event));
   }
 
+  function sendSignal(
+    channel: SignalChannel,
+    targetUserId: string,
+    signal: WebRtcSignal,
+  ) {
+    sendEvent({
+      type: "signal",
+      channel,
+      targetUserId,
+      signal,
+    });
+  }
+
   function updateUser(user: RoomUser) {
-    setUsers((previousUsers) => {
+    setUsersWithUpdater((previousUsers) => {
       const nextUsers = previousUsers.filter(
         (existingUser) => existingUser.id !== user.id,
       );
@@ -102,15 +202,23 @@ export function useVoiceRoom() {
   }
 
   function removeUser(userId: string) {
-    setUsers((previousUsers) =>
+    setUsersWithUpdater((previousUsers) =>
       previousUsers.filter((user) => user.id !== userId),
     );
+  }
+
+  function getUserName(userId: string | null) {
+    if (!userId) {
+      return null;
+    }
+
+    return usersRef.current.find((user) => user.id === userId)?.username ?? null;
   }
 
   function syncPresence(nextMuted: boolean, nextSpeaking: boolean) {
     const selfUserId = selfUserIdRef.current;
     if (selfUserId) {
-      setUsers((previousUsers) =>
+      setUsersWithUpdater((previousUsers) =>
         previousUsers.map((user) =>
           user.id === selfUserId
             ? {
@@ -227,7 +335,7 @@ export function useVoiceRoom() {
     void tryPlayRemoteAudio(peerId, audio);
   }
 
-  function cleanupPeer(
+  function cleanupAudioPeer(
     peerId: string,
     options: { preserveFailure?: boolean } = {},
   ) {
@@ -252,7 +360,7 @@ export function useVoiceRoom() {
     }
   }
 
-  async function flushPendingIceCandidates(peerId: string) {
+  async function flushPendingAudioIceCandidates(peerId: string) {
     const peer = peerConnectionsRef.current.get(peerId);
     const pendingCandidates = pendingIceCandidatesRef.current.get(peerId);
 
@@ -267,7 +375,7 @@ export function useVoiceRoom() {
     }
   }
 
-  function ensurePeerConnection(peerId: string) {
+  function ensureAudioPeerConnection(peerId: string) {
     const existingPeer = peerConnectionsRef.current.get(peerId);
     if (existingPeer) {
       return existingPeer;
@@ -286,17 +394,17 @@ export function useVoiceRoom() {
         return;
       }
 
-      sendEvent({
-        type: "signal",
-        targetUserId: peerId,
-        signal: {
-          type: "ice-candidate",
-          candidate: event.candidate.toJSON(),
-        },
+      sendSignal("audio", peerId, {
+        type: "ice-candidate",
+        candidate: event.candidate.toJSON(),
       });
     };
 
     peer.ontrack = (event) => {
+      if (event.track.kind !== "audio") {
+        return;
+      }
+
       const [stream] = event.streams;
       if (stream) {
         attachRemoteStream(peerId, stream);
@@ -321,7 +429,7 @@ export function useVoiceRoom() {
 
       if (peer.iceConnectionState === "failed") {
         markPeerFailure(peerId);
-        cleanupPeer(peerId, { preserveFailure: true });
+        cleanupAudioPeer(peerId, { preserveFailure: true });
       }
     };
 
@@ -337,12 +445,12 @@ export function useVoiceRoom() {
 
       if (peer.connectionState === "failed") {
         markPeerFailure(peerId);
-        cleanupPeer(peerId, { preserveFailure: true });
+        cleanupAudioPeer(peerId, { preserveFailure: true });
         return;
       }
 
       if (peer.connectionState === "closed") {
-        cleanupPeer(peerId);
+        cleanupAudioPeer(peerId);
       }
     };
 
@@ -350,13 +458,13 @@ export function useVoiceRoom() {
     return peer;
   }
 
-  async function createOfferForPeer(peerId: string) {
+  async function createAudioOfferForPeer(peerId: string) {
     const selfUserId = selfUserIdRef.current;
     if (!selfUserId || selfUserId.localeCompare(peerId) <= 0) {
       return;
     }
 
-    const peer = ensurePeerConnection(peerId);
+    const peer = ensureAudioPeerConnection(peerId);
     if (peer.signalingState !== "stable") {
       return;
     }
@@ -368,22 +476,18 @@ export function useVoiceRoom() {
       return;
     }
 
-    sendEvent({
-      type: "signal",
-      targetUserId: peerId,
-      signal: {
-        type: "offer",
-        sdp: peer.localDescription.toJSON(),
-      },
+    sendSignal("audio", peerId, {
+      type: "offer",
+      sdp: peer.localDescription.toJSON(),
     });
   }
 
-  async function handleSignal(fromUserId: string, signal: WebRtcSignal) {
-    const peer = ensurePeerConnection(fromUserId);
+  async function handleAudioSignal(fromUserId: string, signal: WebRtcSignal) {
+    const peer = ensureAudioPeerConnection(fromUserId);
 
     if (signal.type === "offer") {
       await peer.setRemoteDescription(signal.sdp);
-      await flushPendingIceCandidates(fromUserId);
+      await flushPendingAudioIceCandidates(fromUserId);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
 
@@ -391,13 +495,9 @@ export function useVoiceRoom() {
         return;
       }
 
-      sendEvent({
-        type: "signal",
-        targetUserId: fromUserId,
-        signal: {
-          type: "answer",
-          sdp: peer.localDescription.toJSON(),
-        },
+      sendSignal("audio", fromUserId, {
+        type: "answer",
+        sdp: peer.localDescription.toJSON(),
       });
       return;
     }
@@ -405,7 +505,7 @@ export function useVoiceRoom() {
     if (signal.type === "answer") {
       if (peer.signalingState === "have-local-offer") {
         await peer.setRemoteDescription(signal.sdp);
-        await flushPendingIceCandidates(fromUserId);
+        await flushPendingAudioIceCandidates(fromUserId);
       }
       return;
     }
@@ -421,16 +521,328 @@ export function useVoiceRoom() {
     pendingIceCandidatesRef.current.set(fromUserId, pendingCandidates);
   }
 
+  function stopLocalScreenCapture() {
+    const stream = localScreenStreamRef.current;
+    if (!stream) {
+      return;
+    }
+
+    localScreenStreamRef.current = null;
+    for (const track of stream.getTracks()) {
+      track.onended = null;
+      track.stop();
+    }
+  }
+
+  function cleanupScreenPeer(peerId: string) {
+    const peer = screenPeerConnectionsRef.current.get(peerId);
+    if (peer) {
+      peer.close();
+      screenPeerConnectionsRef.current.delete(peerId);
+    }
+
+    pendingScreenIceCandidatesRef.current.delete(peerId);
+    if (
+      activeScreenShareUserIdRef.current === peerId &&
+      activeScreenShareUserIdRef.current !== selfUserIdRef.current
+    ) {
+      setActiveScreenStreamState(null);
+    }
+  }
+
+  function cleanupAllScreenPeers() {
+    for (const peerId of [...screenPeerConnectionsRef.current.keys()]) {
+      cleanupScreenPeer(peerId);
+    }
+
+    pendingScreenIceCandidatesRef.current.clear();
+  }
+
+  function ensureScreenPeerConnection(peerId: string) {
+    const existingPeer = screenPeerConnectionsRef.current.get(peerId);
+    if (existingPeer) {
+      return existingPeer;
+    }
+
+    const peer = new RTCPeerConnection(rtcConfigurationRef.current);
+    const localScreenStream = localScreenStreamRef.current;
+    if (
+      localScreenStream &&
+      selfUserIdRef.current &&
+      selfUserIdRef.current === activeScreenShareUserIdRef.current
+    ) {
+      for (const track of localScreenStream.getVideoTracks()) {
+        peer.addTrack(track, localScreenStream);
+      }
+    }
+
+    peer.onicecandidate = (event) => {
+      if (!event.candidate) {
+        return;
+      }
+
+      sendSignal("screen", peerId, {
+        type: "ice-candidate",
+        candidate: event.candidate.toJSON(),
+      });
+    };
+
+    peer.ontrack = (event) => {
+      if (event.track.kind !== "video") {
+        return;
+      }
+
+      if (peerId !== activeScreenShareUserIdRef.current) {
+        return;
+      }
+
+      const [stream] = event.streams;
+      if (stream) {
+        setActiveScreenStreamState(stream);
+      } else {
+        setActiveScreenStreamState(new MediaStream([event.track]));
+      }
+
+      setScreenShareError(null);
+    };
+
+    const handlePeerFailure = () => {
+      if (
+        peerId === activeScreenShareUserIdRef.current &&
+        activeScreenShareUserIdRef.current !== selfUserIdRef.current
+      ) {
+        setActiveScreenStreamState(null);
+        setScreenShareError(getScreenShareConnectionFailedMessage());
+      }
+
+      cleanupScreenPeer(peerId);
+    };
+
+    peer.oniceconnectionstatechange = () => {
+      if (screenPeerConnectionsRef.current.get(peerId) !== peer) {
+        return;
+      }
+
+      if (
+        peer.iceConnectionState === "connected" ||
+        peer.iceConnectionState === "completed"
+      ) {
+        if (
+          peerId === activeScreenShareUserIdRef.current &&
+          activeScreenShareUserIdRef.current !== selfUserIdRef.current
+        ) {
+          setScreenShareError(null);
+        }
+        return;
+      }
+
+      if (peer.iceConnectionState === "failed") {
+        handlePeerFailure();
+      }
+    };
+
+    peer.onconnectionstatechange = () => {
+      if (screenPeerConnectionsRef.current.get(peerId) !== peer) {
+        return;
+      }
+
+      if (peer.connectionState === "connected") {
+        if (
+          peerId === activeScreenShareUserIdRef.current &&
+          activeScreenShareUserIdRef.current !== selfUserIdRef.current
+        ) {
+          setScreenShareError(null);
+        }
+        return;
+      }
+
+      if (peer.connectionState === "failed") {
+        handlePeerFailure();
+        return;
+      }
+
+      if (peer.connectionState === "closed") {
+        cleanupScreenPeer(peerId);
+      }
+    };
+
+    screenPeerConnectionsRef.current.set(peerId, peer);
+    return peer;
+  }
+
+  async function flushPendingScreenIceCandidates(peerId: string) {
+    const peer = screenPeerConnectionsRef.current.get(peerId);
+    const pendingCandidates = pendingScreenIceCandidatesRef.current.get(peerId);
+
+    if (!peer || !peer.remoteDescription || !pendingCandidates?.length) {
+      return;
+    }
+
+    pendingScreenIceCandidatesRef.current.delete(peerId);
+
+    for (const candidate of pendingCandidates) {
+      await peer.addIceCandidate(candidate);
+    }
+  }
+
+  async function createScreenOfferForPeer(peerId: string) {
+    const selfUserId = selfUserIdRef.current;
+    const localScreenStream = localScreenStreamRef.current;
+    if (
+      !selfUserId ||
+      selfUserId === peerId ||
+      activeScreenShareUserIdRef.current !== selfUserId ||
+      !localScreenStream
+    ) {
+      return;
+    }
+
+    const peer = ensureScreenPeerConnection(peerId);
+    if (peer.signalingState !== "stable") {
+      return;
+    }
+
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
+
+    if (!peer.localDescription) {
+      return;
+    }
+
+    sendSignal("screen", peerId, {
+      type: "offer",
+      sdp: peer.localDescription.toJSON(),
+    });
+  }
+
+  async function handleScreenSignal(fromUserId: string, signal: WebRtcSignal) {
+    const selfUserId = selfUserIdRef.current;
+    const activePresenterId = activeScreenShareUserIdRef.current;
+    const isSelfPresenter = Boolean(
+      selfUserId && activePresenterId === selfUserId,
+    );
+
+    if (signal.type === "offer") {
+      if (isSelfPresenter || fromUserId !== activePresenterId) {
+        return;
+      }
+
+      const peer = ensureScreenPeerConnection(fromUserId);
+      await peer.setRemoteDescription(signal.sdp);
+      await flushPendingScreenIceCandidates(fromUserId);
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+
+      if (!peer.localDescription) {
+        return;
+      }
+
+      sendSignal("screen", fromUserId, {
+        type: "answer",
+        sdp: peer.localDescription.toJSON(),
+      });
+      return;
+    }
+
+    if (signal.type === "answer") {
+      if (!isSelfPresenter) {
+        return;
+      }
+
+      const peer = ensureScreenPeerConnection(fromUserId);
+      if (peer.signalingState === "have-local-offer") {
+        await peer.setRemoteDescription(signal.sdp);
+        await flushPendingScreenIceCandidates(fromUserId);
+      }
+      return;
+    }
+
+    if (!isSelfPresenter && fromUserId !== activePresenterId) {
+      return;
+    }
+
+    const peer = ensureScreenPeerConnection(fromUserId);
+    if (peer.remoteDescription) {
+      await peer.addIceCandidate(signal.candidate);
+      return;
+    }
+
+    const pendingCandidates =
+      pendingScreenIceCandidatesRef.current.get(fromUserId) ?? [];
+    pendingCandidates.push(signal.candidate);
+    pendingScreenIceCandidatesRef.current.set(fromUserId, pendingCandidates);
+  }
+
+  function applyActiveScreenShareUpdate(nextUserId: string | null) {
+    const previousUserId = activeScreenShareUserIdRef.current;
+    activeScreenShareUserIdRef.current = nextUserId;
+    setActiveScreenShareUserId(nextUserId);
+
+    const selfUserId = selfUserIdRef.current;
+    if (previousUserId === nextUserId) {
+      if (nextUserId === selfUserId && localScreenStreamRef.current) {
+        setActiveScreenStreamState(localScreenStreamRef.current);
+        setScreenShareStatusState("sharing");
+        setScreenShareError(null);
+      }
+      return;
+    }
+
+    cleanupAllScreenPeers();
+    setActiveScreenStreamState(null);
+
+    const idleStatus = getInitialScreenShareStatus();
+    if (previousUserId === selfUserId && nextUserId !== selfUserId) {
+      stopLocalScreenCapture();
+      setScreenShareStatusState(idleStatus);
+      setScreenShareError(null);
+
+      const nextPresenterName = getUserName(nextUserId);
+      setScreenShareNotice(
+        nextPresenterName ? `${nextPresenterName} took over screen sharing.` : null,
+      );
+      return;
+    }
+
+    if (nextUserId === selfUserId) {
+      const localScreenStream = localScreenStreamRef.current;
+      setScreenShareNotice(null);
+      if (!localScreenStream) {
+        setScreenShareStatusState(idleStatus);
+        setScreenShareError(null);
+        sendEvent({
+          type: "screen-share:stop",
+        });
+        return;
+      }
+
+      setActiveScreenStreamState(localScreenStream);
+      setScreenShareStatusState("sharing");
+      setScreenShareError(null);
+      for (const user of usersRef.current) {
+        if (user.id !== selfUserId) {
+          void createScreenOfferForPeer(user.id);
+        }
+      }
+      return;
+    }
+
+    setScreenShareStatusState(idleStatus);
+    setScreenShareError(null);
+    setScreenShareNotice(null);
+  }
+
   async function handleServerEvent(event: ServerEvent) {
     if (event.type === "room:snapshot") {
       selfUserIdRef.current = event.selfUserId;
       rtcConfigurationRef.current = event.rtcConfiguration as RTCConfiguration;
       hasTurnRelayRef.current = hasTurnRelay(rtcConfigurationRef.current);
-      setUsers(sortUsers(event.users));
+      setUsersState(sortUsers(event.users));
+      applyActiveScreenShareUpdate(event.activeScreenShareUserId);
 
       for (const user of event.users) {
         if (user.id !== event.selfUserId) {
-          void createOfferForPeer(user.id);
+          void createAudioOfferForPeer(user.id);
         }
       }
 
@@ -440,7 +852,10 @@ export function useVoiceRoom() {
     if (event.type === "room:user-joined") {
       updateUser(event.user);
       if (event.user.id !== selfUserIdRef.current) {
-        void createOfferForPeer(event.user.id);
+        void createAudioOfferForPeer(event.user.id);
+        if (selfUserIdRef.current === activeScreenShareUserIdRef.current) {
+          void createScreenOfferForPeer(event.user.id);
+        }
       }
       return;
     }
@@ -450,18 +865,37 @@ export function useVoiceRoom() {
       return;
     }
 
+    if (event.type === "room:screen-share-updated") {
+      applyActiveScreenShareUpdate(event.activeScreenShareUserId);
+      return;
+    }
+
     if (event.type === "room:user-left") {
       clearPeerFailure(event.userId);
-      cleanupPeer(event.userId);
+      cleanupAudioPeer(event.userId);
+      cleanupScreenPeer(event.userId);
       removeUser(event.userId);
+
+      if (event.userId === activeScreenShareUserIdRef.current) {
+        applyActiveScreenShareUpdate(null);
+      }
       return;
     }
 
     if (event.type === "signal") {
       try {
-        await handleSignal(event.fromUserId, event.signal);
+        if (event.channel === "audio") {
+          await handleAudioSignal(event.fromUserId, event.signal);
+        } else {
+          await handleScreenSignal(event.fromUserId, event.signal);
+        }
       } catch {
-        setConnectionError("Peer connection renegotiation failed.");
+        if (event.channel === "audio") {
+          setConnectionError("Peer connection renegotiation failed.");
+        } else {
+          cleanupScreenPeer(event.fromUserId);
+          setScreenShareError("Screen share negotiation failed.");
+        }
       }
       return;
     }
@@ -523,8 +957,12 @@ export function useVoiceRoom() {
     stopSpeechDetection();
 
     for (const peerId of [...peerConnectionsRef.current.keys()]) {
-      cleanupPeer(peerId);
+      cleanupAudioPeer(peerId);
     }
+
+    cleanupAllScreenPeers();
+    stopLocalScreenCapture();
+    setActiveScreenStreamState(null);
 
     const stream = localStreamRef.current;
     if (stream) {
@@ -540,11 +978,17 @@ export function useVoiceRoom() {
     }
     wsRef.current = null;
     selfUserIdRef.current = null;
+    activeScreenShareUserIdRef.current = null;
+    setActiveScreenShareUserId(null);
     pendingIceCandidatesRef.current.clear();
+    pendingScreenIceCandidatesRef.current.clear();
     speakingRef.current = false;
     blockedAudioPeersRef.current.clear();
     failedPeersRef.current.clear();
     setMediaError(null);
+    setScreenShareError(null);
+    setScreenShareNotice(null);
+    setScreenShareStatusState(getInitialScreenShareStatus());
   }
 
   useEffect(() => {
@@ -556,6 +1000,9 @@ export function useVoiceRoom() {
         setConnectionState("requesting-media");
         setConnectionError(null);
         setMediaError(null);
+        setScreenShareError(null);
+        setScreenShareNotice(null);
+        setScreenShareStatusState(getInitialScreenShareStatus());
         hasTurnRelayRef.current = false;
 
         if (!navigator.mediaDevices?.getUserMedia) {
@@ -674,10 +1121,119 @@ export function useVoiceRoom() {
     syncPresence(nextMuted, speakingRef.current);
   }
 
+  async function startScreenShare() {
+    if (
+      screenShareStatusRef.current === "requesting" ||
+      screenShareStatusRef.current === "starting" ||
+      screenShareStatusRef.current === "sharing" ||
+      screenShareStatusRef.current === "stopping"
+    ) {
+      return;
+    }
+
+    if (!supportsScreenShare()) {
+      setScreenShareStatusState("unsupported");
+      setScreenShareError(getScreenShareUnavailableMessage());
+      return;
+    }
+
+    if (
+      connectionState === "disconnected" ||
+      !selfUserIdRef.current ||
+      !wsRef.current ||
+      wsRef.current.readyState !== WebSocket.OPEN
+    ) {
+      setScreenShareError(getScreenShareNotReadyMessage());
+      return;
+    }
+
+    setScreenShareNotice(null);
+    setScreenShareError(null);
+    setScreenShareStatusState("requesting");
+
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        audio: false,
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 15, max: 15 },
+        },
+      });
+
+      const [track] = stream.getVideoTracks();
+      if (!track) {
+        for (const streamTrack of stream.getTracks()) {
+          streamTrack.stop();
+        }
+        setScreenShareStatusState(getInitialScreenShareStatus());
+        setScreenShareError(getScreenShareFailedMessage());
+        return;
+      }
+
+      stopLocalScreenCapture();
+      if ("contentHint" in track) {
+        track.contentHint = "detail";
+      }
+      track.onended = () => {
+        stopScreenShare();
+      };
+
+      localScreenStreamRef.current = stream;
+      setScreenShareStatusState("starting");
+      sendEvent({
+        type: "screen-share:start",
+      });
+    } catch (cause) {
+      setScreenShareStatusState(getInitialScreenShareStatus());
+      if (
+        cause instanceof DOMException &&
+        (cause.name === "AbortError" || cause.name === "NotAllowedError")
+      ) {
+        setScreenShareError(getScreenShareCancelledMessage());
+      } else {
+        setScreenShareError(getScreenShareFailedMessage());
+      }
+    }
+  }
+
+  function stopScreenShare(options: { notifyServer?: boolean } = {}) {
+    const notifyServer = options.notifyServer ?? true;
+    const selfUserId = selfUserIdRef.current;
+    const wasActivePresenter = Boolean(
+      selfUserId && activeScreenShareUserIdRef.current === selfUserId,
+    );
+    const hadLocalScreen = Boolean(localScreenStreamRef.current);
+
+    if (!hadLocalScreen && !wasActivePresenter) {
+      setScreenShareStatusState(getInitialScreenShareStatus());
+      setScreenShareNotice(null);
+      return;
+    }
+
+    if (notifyServer && wasActivePresenter) {
+      setScreenShareStatusState("stopping");
+    } else {
+      setScreenShareStatusState(getInitialScreenShareStatus());
+    }
+
+    stopLocalScreenCapture();
+    cleanupAllScreenPeers();
+    setActiveScreenStreamState(null);
+    setScreenShareError(null);
+    setScreenShareNotice(null);
+
+    if (notifyServer && wasActivePresenter) {
+      sendEvent({
+        type: "screen-share:stop",
+      });
+    }
+  }
+
   function disconnect() {
     manualDisconnectRef.current = true;
     teardownRoomConnection();
-    setUsers([]);
+    setUsersState([]);
     setConnectionState("disconnected");
   }
 
@@ -687,7 +1243,14 @@ export function useVoiceRoom() {
     isMuted,
     connectionState,
     error: connectionError ?? mediaError,
+    activeScreenShareUserId,
+    activeScreenStream,
+    screenShareStatus,
+    screenShareError,
+    screenShareNotice,
     toggleMute,
+    startScreenShare,
+    stopScreenShare,
     disconnect,
   };
 }

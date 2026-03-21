@@ -37,6 +37,8 @@ export interface ErrorPayload {
   message: string;
 }
 
+export type SignalChannel = "audio" | "screen";
+
 export type WebRtcSignal =
   | {
       type: "offer";
@@ -58,7 +60,14 @@ export type ClientEvent =
       isSpeaking: boolean;
     }
   | {
+      type: "screen-share:start";
+    }
+  | {
+      type: "screen-share:stop";
+    }
+  | {
       type: "signal";
+      channel: SignalChannel;
       targetUserId: string;
       signal: WebRtcSignal;
     };
@@ -70,6 +79,7 @@ export type ServerEvent =
       roomId: string;
       users: RoomUser[];
       rtcConfiguration: RtcConfigurationPayload;
+      activeScreenShareUserId: string | null;
     }
   | {
       type: "room:user-joined";
@@ -84,7 +94,12 @@ export type ServerEvent =
       user: RoomUser;
     }
   | {
+      type: "room:screen-share-updated";
+      activeScreenShareUserId: string | null;
+    }
+  | {
       type: "signal";
+      channel: SignalChannel;
       fromUserId: string;
       signal: WebRtcSignal;
     }

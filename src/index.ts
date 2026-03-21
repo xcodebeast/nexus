@@ -42,6 +42,7 @@ interface SocketData {
 const sessions = new Map<string, SessionRecord>();
 const participants = new Map<string, ParticipantRecord>();
 const sockets = new Map<string, ServerWebSocket<SocketData>>();
+let activeScreenShareUserId: string | null = null;
 const defaultRtcConfiguration = buildStaticRtcConfiguration();
 const verifyPassword = await buildPasswordVerifier();
 
@@ -335,6 +336,13 @@ function broadcast(event: ServerEvent) {
   server.publish(ROOM_TOPIC, JSON.stringify(event));
 }
 
+function broadcastScreenShareState() {
+  broadcast({
+    type: "room:screen-share-updated",
+    activeScreenShareUserId,
+  });
+}
+
 function removeParticipant(
   sessionId: string,
   closingSocket?: ServerWebSocket<SocketData>,
@@ -351,6 +359,11 @@ function removeParticipant(
 
   if (!participant) {
     return;
+  }
+
+  if (activeScreenShareUserId === sessionId) {
+    activeScreenShareUserId = null;
+    broadcastScreenShareState();
   }
 
   participants.delete(sessionId);
@@ -522,6 +535,7 @@ const server = serve<SocketData>({
           roomId: ROOM_ID,
           users: getSortedUsers(),
           rtcConfiguration: session.rtcConfiguration,
+          activeScreenShareUserId,
         } satisfies ServerEvent),
       );
       broadcast({
@@ -563,6 +577,30 @@ const server = serve<SocketData>({
         return;
       }
 
+      if (event.type === "screen-share:start") {
+        activeScreenShareUserId = session.id;
+        broadcastScreenShareState();
+        return;
+      }
+
+      if (event.type === "screen-share:stop") {
+        if (activeScreenShareUserId === session.id) {
+          activeScreenShareUserId = null;
+          broadcastScreenShareState();
+        }
+        return;
+      }
+
+      if (event.channel === "screen" && activeScreenShareUserId !== session.id) {
+        ws.send(
+          JSON.stringify({
+            type: "error",
+            message: "Only the active presenter can send screen sharing signals.",
+          } satisfies ServerEvent),
+        );
+        return;
+      }
+
       const targetSocket = sockets.get(event.targetUserId);
       if (!targetSocket) {
         ws.send(
@@ -577,6 +615,7 @@ const server = serve<SocketData>({
       targetSocket.send(
         JSON.stringify({
           type: "signal",
+          channel: event.channel,
           fromUserId: session.id,
           signal: event.signal,
         } satisfies ServerEvent),

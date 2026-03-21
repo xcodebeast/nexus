@@ -1,6 +1,6 @@
 # Nexus
 
-A lightweight, self-hosted voice chat application with a Matrix-inspired terminal aesthetic.
+A lightweight, self-hosted voice chat application with a Matrix-inspired terminal aesthetic and single-presenter screen sharing.
 
 ## Getting Started
 
@@ -66,6 +66,8 @@ Compose reads local environment variables and wires the service to port `3000` b
 - Animated "lava-lamp" style user avatars with organic blob shapes
 - Real-time speaking indicators driven by live microphone activity
 - Audio controls for muting/unmuting microphone
+- Single-presenter screen sharing with automatic takeover when another user starts presenting
+- Inline screen stage for local preview and remote viewing
 - Bun-native room session API and WebSocket signaling
 - Browser-to-browser audio transport over WebRTC
 - Clean disconnect flow to return to the intro screen
@@ -91,10 +93,14 @@ Compose reads local environment variables and wires the service to port `3000` b
 - **Sessions/Auth**: Bun HTTP routes at `/api/session`
 - **Presence/Signaling**: Bun native WebSockets at `/api/ws`
 - **Audio**: WebRTC peer mesh between connected browsers
+- **Screen Share**: Server-authoritative single presenter over a separate WebRTC video mesh channel
 
-WebSockets handle room state and WebRTC offer/answer/ICE exchange. Audio does not flow through the Bun server.
+WebSockets handle room state, presenter ownership, and WebRTC offer/answer/ICE exchange. Audio and screen video do not flow through the Bun server.
+
+Only one user can present at a time. If another user starts screen sharing, the current presenter is stopped automatically and the room switches to the new presenter.
 
 Microphone access requires a secure context in the browser. Use HTTPS in deployed environments, or `localhost` during development.
+Screen sharing is optimized for desktop Chromium browsers in the current small-room peer-mesh architecture.
 
 ## Environment
 
