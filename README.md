@@ -1,6 +1,6 @@
 # Nexus
 
-A lightweight, self-hosted voice chat application with a Matrix-inspired terminal aesthetic and single-presenter screen sharing.
+A fast, lightweight, minimal, self-hosted voice chat webapp with a Matrix-inspired aesthetic made for power users that are tired of using bloated proprietary software that trades with your personal data.
 
 ## Getting Started
 
@@ -52,11 +52,6 @@ Compose reads local environment variables and wires the service to port `3000` b
 
 ## Features
 
-### Matrix Rain Animation
-- Full-screen canvas animation with falling characters inspired by The Matrix
-- Serves as a dramatic intro sequence on first visit
-- Persists as a subtle background effect throughout the application
-
 ### Terminal-Style Authentication
 - Minimalist login modal with retro terminal aesthetics
 - Visual feedback on authentication errors (screen shake and red glow effect)
@@ -66,18 +61,12 @@ Compose reads local environment variables and wires the service to port `3000` b
 - Animated "lava-lamp" style user avatars with organic blob shapes
 - Real-time speaking indicators driven by live microphone activity
 - Audio controls for muting/unmuting microphone
+- Local RNNoise-based microphone denoising with automatic browser fallback
 - Single-presenter screen sharing with automatic takeover when another user starts presenting
 - Inline screen stage for local preview and remote viewing
 - Bun-native room session API and WebSocket signaling
 - Browser-to-browser audio transport over WebRTC
 - Clean disconnect flow to return to the intro screen
-
-### Design Details
-- Dark terminal aesthetic with Matrix green (#00ff41) as the primary accent
-- Scanline overlay effect for authentic CRT monitor feel
-- Monospace typography throughout (Geist Mono)
-- Fully responsive design optimized for both desktop and mobile
-- Custom scrollbar styling to match the theme
 
 ## Tech Stack
 
@@ -100,6 +89,7 @@ WebSockets handle room state, presenter ownership, and WebRTC offer/answer/ICE e
 Only one user can present at a time. If another user starts screen sharing, the current presenter is stopped automatically and the room switches to the new presenter.
 
 Microphone access requires a secure context in the browser. Use HTTPS in deployed environments, or `localhost` during development.
+When the browser supports AudioWorklet, Nexus denoises the outgoing mic stream locally before it is sent to peers. If RNNoise cannot start or the browser lacks support, Nexus falls back to browser DSP/pass-through without breaking the call.
 Screen sharing is optimized for desktop Chromium browsers in the current small-room peer-mesh architecture.
 
 ## Environment

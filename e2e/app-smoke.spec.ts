@@ -111,6 +111,26 @@ async function expectGeneratedTurnConfig(page: Page) {
     .toBe(true);
 }
 
+async function expectMicProcessingLabelHidden(page: Page) {
+  await expect(page.getByText(/Mic:\s+(enhanced|standard)/i)).toHaveCount(0);
+}
+
+async function expectAudioWorkletAttempted(page: Page) {
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        return (
+          (
+            window as Window & {
+              __nexusAudioWorklet?: { addModuleCallCount?: number };
+            }
+          ).__nexusAudioWorklet?.addModuleCallCount ?? 0
+        );
+      });
+    })
+    .toBeGreaterThan(0);
+}
+
 async function clickScreenShare(page: Page) {
   await page
     .getByRole("button", { name: /share screen|take over share/i })
@@ -254,6 +274,56 @@ function installPeerTracker() {
 
   Object.setPrototypeOf(TrackingPeerConnection, OriginalPeerConnection);
   window.RTCPeerConnection = TrackingPeerConnection;
+}
+
+function installAudioWorkletPassThrough() {
+  const audioWorkletState = {
+    addModuleCallCount: 0,
+  };
+  Object.defineProperty(window, "__nexusAudioWorklet", {
+    configurable: true,
+    value: audioWorkletState,
+  });
+
+  if ("AudioWorklet" in window) {
+    window.AudioWorklet.prototype.addModule = async function () {
+      audioWorkletState.addModuleCallCount += 1;
+    };
+  }
+
+  class MockAudioWorkletNode extends GainNode {
+    port = {
+      postMessage() {},
+    };
+
+    constructor(context: BaseAudioContext) {
+      super(context);
+    }
+  }
+
+  Object.defineProperty(window, "AudioWorkletNode", {
+    configurable: true,
+    value: MockAudioWorkletNode,
+  });
+}
+
+function installAudioWorkletModuleFailure() {
+  const audioWorkletState = {
+    addModuleCallCount: 0,
+  };
+  Object.defineProperty(window, "__nexusAudioWorklet", {
+    configurable: true,
+    value: audioWorkletState,
+  });
+
+  if (!("AudioWorklet" in window)) {
+    return;
+  }
+
+  window.AudioWorklet.prototype.addModule = async () => {
+    audioWorkletState.addModuleCallCount += 1;
+    throw new Error("Simulated RNNoise worklet load failure.");
+  };
 }
 
 function installScreenShareMocks() {
@@ -413,6 +483,60 @@ test("authenticates and synchronizes room presence between two clients", async (
 
   await bobPage.getByRole("button", { name: /disconnect/i }).click();
   await expect(alicePage.getByText(/1 connected/i)).toBeVisible();
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
+test("initializes RNNoise without showing a mic mode label", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installAudioWorkletPassThrough,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installAudioWorkletPassThrough,
+  ]);
+
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+
+  await expectMicProcessingLabelHidden(alicePage);
+  await expectMicProcessingLabelHidden(bobPage);
+  await expectAudioWorkletAttempted(alicePage);
+  await expectAudioWorkletAttempted(bobPage);
+  await expectRemoteAudioPlaying(alicePage);
+  await expectRemoteAudioPlaying(bobPage);
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
+test("falls back without showing a mic mode label when RNNoise cannot start", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installAudioWorkletModuleFailure,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installAudioWorkletModuleFailure,
+  ]);
+
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+
+  await expectMicProcessingLabelHidden(alicePage);
+  await expectMicProcessingLabelHidden(bobPage);
+  await expectAudioWorkletAttempted(alicePage);
+  await expectAudioWorkletAttempted(bobPage);
+  await expectRemoteAudioPlaying(alicePage);
+  await expectRemoteAudioPlaying(bobPage);
 
   await aliceContext.close();
   await bobContext.close();

@@ -6,6 +6,12 @@ import type {
   SignalChannel,
   WebRtcSignal,
 } from "@/lib/protocol";
+import {
+  prepareLocalAudio,
+  type AudioProcessingMode,
+  type AudioProcessingReason,
+  type PreparedLocalAudio,
+} from "@/lib/audio/noise-processing";
 
 type ConnectionState =
   | "requesting-media"
@@ -103,6 +109,10 @@ export function useVoiceRoom() {
     useState<ConnectionState>("requesting-media");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [audioProcessingMode, setAudioProcessingMode] =
+    useState<AudioProcessingMode>("standard");
+  const [audioProcessingReason, setAudioProcessingReason] =
+    useState<AudioProcessingReason>("unsupported");
   const [activeScreenShareUserId, setActiveScreenShareUserId] = useState<
     string | null
   >(null);
@@ -119,7 +129,7 @@ export function useVoiceRoom() {
   const wsRef = useRef<WebSocket | null>(null);
   const selfUserIdRef = useRef<string | null>(null);
   const usersRef = useRef<RoomUser[]>([]);
-  const localStreamRef = useRef<MediaStream | null>(null);
+  const localAudioRef = useRef<PreparedLocalAudio | null>(null);
   const localScreenStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const screenPeerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
@@ -133,7 +143,6 @@ export function useVoiceRoom() {
   const rtcConfigurationRef = useRef<RTCConfiguration>({
     iceServers: [],
   });
-  const audioContextRef = useRef<AudioContext | null>(null);
   const speechFrameRef = useRef<number | null>(null);
   const manualDisconnectRef = useRef(false);
   const isMutedRef = useRef(false);
@@ -240,14 +249,12 @@ export function useVoiceRoom() {
 
   function setTrackMute(nextMuted: boolean) {
     isMutedRef.current = nextMuted;
-    const stream = localStreamRef.current;
-    if (!stream) {
+    const localAudio = localAudioRef.current;
+    if (!localAudio) {
       return;
     }
 
-    for (const track of stream.getAudioTracks()) {
-      track.enabled = !nextMuted;
-    }
+    localAudio.setMuted(nextMuted);
   }
 
   function syncMediaError() {
@@ -382,10 +389,10 @@ export function useVoiceRoom() {
     }
 
     const peer = new RTCPeerConnection(rtcConfigurationRef.current);
-    const localStream = localStreamRef.current;
-    if (localStream) {
-      for (const track of localStream.getTracks()) {
-        peer.addTrack(track, localStream);
+    const localAudio = localAudioRef.current;
+    if (localAudio) {
+      for (const track of localAudio.outboundStream.getAudioTracks()) {
+        peer.addTrack(track, localAudio.outboundStream);
       }
     }
 
@@ -908,25 +915,12 @@ export function useVoiceRoom() {
       cancelAnimationFrame(speechFrameRef.current);
       speechFrameRef.current = null;
     }
-
-    if (audioContextRef.current) {
-      void audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
   }
 
-  function startSpeechDetection(stream: MediaStream) {
-    const AudioContextCtor = window.AudioContext;
-    if (!AudioContextCtor) {
+  function startSpeechDetection(analyser: AnalyserNode | null) {
+    if (!analyser) {
       return;
     }
-
-    const audioContext = new AudioContextCtor();
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-
-    const source = audioContext.createMediaStreamSource(stream);
-    source.connect(analyser);
 
     const samples = new Float32Array(analyser.fftSize);
 
@@ -949,7 +943,6 @@ export function useVoiceRoom() {
       speechFrameRef.current = requestAnimationFrame(tick);
     };
 
-    audioContextRef.current = audioContext;
     speechFrameRef.current = requestAnimationFrame(tick);
   }
 
@@ -964,12 +957,10 @@ export function useVoiceRoom() {
     stopLocalScreenCapture();
     setActiveScreenStreamState(null);
 
-    const stream = localStreamRef.current;
-    if (stream) {
-      for (const track of stream.getTracks()) {
-        track.stop();
-      }
-      localStreamRef.current = null;
+    const localAudio = localAudioRef.current;
+    if (localAudio) {
+      localAudio.destroy();
+      localAudioRef.current = null;
     }
 
     const ws = wsRef.current;
@@ -986,6 +977,8 @@ export function useVoiceRoom() {
     blockedAudioPeersRef.current.clear();
     failedPeersRef.current.clear();
     setMediaError(null);
+    setAudioProcessingMode("standard");
+    setAudioProcessingReason("unsupported");
     setScreenShareError(null);
     setScreenShareNotice(null);
     setScreenShareStatusState(getInitialScreenShareStatus());
@@ -1000,6 +993,8 @@ export function useVoiceRoom() {
         setConnectionState("requesting-media");
         setConnectionError(null);
         setMediaError(null);
+        setAudioProcessingMode("standard");
+        setAudioProcessingReason("unsupported");
         setScreenShareError(null);
         setScreenShareNotice(null);
         setScreenShareStatusState(getInitialScreenShareStatus());
@@ -1009,24 +1004,25 @@ export function useVoiceRoom() {
           throw new Error(getMicrophoneUnavailableMessage());
         }
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            autoGainControl: true,
-            echoCancellation: true,
-            noiseSuppression: true,
+        const localAudio = await prepareLocalAudio({
+          onStateChange: (state) => {
+            if (!isActive) {
+              return;
+            }
+
+            setAudioProcessingMode(state.mode);
+            setAudioProcessingReason(state.reason);
           },
         });
 
         if (!isActive) {
-          for (const track of stream.getTracks()) {
-            track.stop();
-          }
+          localAudio.destroy();
           return;
         }
 
-        localStreamRef.current = stream;
+        localAudioRef.current = localAudio;
         setTrackMute(isMutedRef.current);
-        startSpeechDetection(stream);
+        startSpeechDetection(localAudio.analyser);
         setConnectionState("connecting");
 
         const ws = new WebSocket(buildWebSocketUrl("/api/ws"));
@@ -1243,6 +1239,8 @@ export function useVoiceRoom() {
     isMuted,
     connectionState,
     error: connectionError ?? mediaError,
+    audioProcessingMode,
+    audioProcessingReason,
     activeScreenShareUserId,
     activeScreenStream,
     screenShareStatus,
