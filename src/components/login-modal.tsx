@@ -152,10 +152,6 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
               <>{">"} Authenticate</>
             )}
           </Button>
-          
-          <p className="text-xs text-muted-foreground/60 font-mono text-center">
-            Hint: password is &quot;nexus&quot;
-          </p>
         </form>
       </DialogContent>
     </Dialog>

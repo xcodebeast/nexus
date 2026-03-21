@@ -54,6 +54,40 @@ async function expectRemoteAudioPlaying(page: Page) {
     });
 }
 
+async function expectGeneratedTurnConfig(page: Page) {
+  await expect
+    .poll(async () => {
+      return page.evaluate(async () => {
+        const response = await fetch("/api/session", {
+          credentials: "same-origin",
+        });
+        if (!response.ok) {
+          return null;
+        }
+
+        const payload = (await response.json()) as {
+          rtcConfiguration?: {
+            iceServers?: Array<{
+              urls: string | string[];
+              username?: string;
+              credential?: string;
+            }>;
+          };
+        };
+
+        return (payload.rtcConfiguration?.iceServers ?? []).some((server) => {
+          const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+          return (
+            urls.some((url) => url.includes("turn.cloudflare.com")) &&
+            Boolean(server.username) &&
+            Boolean(server.credential)
+          );
+        });
+      });
+    })
+    .toBe(true);
+}
+
 function installAutoplayBlocker() {
   let interactionToken = 0;
 
@@ -135,6 +169,8 @@ test("authenticates and synchronizes room presence between two clients", async (
   await expect(bobPage.getByText("Alice")).toBeVisible();
   await expect(alicePage.getByText(/2 connected/i)).toBeVisible();
   await expect(alicePage.getByText("Bob")).toBeVisible();
+  await expectGeneratedTurnConfig(alicePage);
+  await expectGeneratedTurnConfig(bobPage);
   await expectRemoteAudioPlaying(alicePage);
   await expectRemoteAudioPlaying(bobPage);
 
@@ -170,7 +206,7 @@ test("retries blocked remote audio playback after the next user interaction", as
   await bobContext.close();
 });
 
-test("shows a TURN-focused error when the peer audio connection fails", async ({
+test("shows a peer audio connection error when the media path fails", async ({
   browser,
 }) => {
   const aliceContext = await createVoiceContext(browser, installPeerTracker);
@@ -203,7 +239,7 @@ test("shows a TURN-focused error when the peer audio connection fails", async ({
   });
 
   await expect(
-    alicePage.getByText(/TURN relay is not configured/i),
+    alicePage.getByText(/peer audio connection failed\. check network access and reconnect\./i),
   ).toBeVisible();
 
   await aliceContext.close();

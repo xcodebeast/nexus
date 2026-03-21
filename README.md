@@ -106,13 +106,16 @@ Optional environment variables:
 - `NEXUS_PASSWORD_HASH`: pre-hashed password verified with `Bun.password.verify()`
 - `NEXUS_ROOM_ID`: room identifier, defaults to `main`
 - `NEXUS_STUN_URLS`: comma-separated STUN URLs
+- `CLOUDFLARE_TURN_KEY_ID`: Cloudflare TURN key ID for generated credentials
+- `CLOUDFLARE_TURN_API_TOKEN`: Cloudflare API token used server-side to mint TURN credentials
+- `CLOUDFLARE_TURN_TTL_SECONDS`: optional TURN credential lifetime, defaults to `86400`
 - `NEXUS_TURN_URLS`: comma-separated TURN URLs
 - `NEXUS_TURN_USERNAME`: TURN username
 - `NEXUS_TURN_CREDENTIAL`: TURN credential
 
 If `NEXUS_PASSWORD_HASH` is empty, malformed, or uses an unsupported algorithm, the server falls back to `NEXUS_PASSWORD`.
 
-For production reliability across restrictive NATs, configure TURN credentials. STUN-only setups are usually enough for local development but not enough for every real network.
+For production reliability across restrictive NATs, configure TURN credentials. STUN-only setups are usually enough for local development but not enough for every real network. If Cloudflare TURN variables are set, the server generates short-lived ICE credentials automatically and those take precedence over the static `NEXUS_TURN_*` values.
 If users can see each other's speaking glow but hear no audio, the signaling path is working and the media path is likely failing. The most common production cause is missing TURN relay configuration.
 
 ## License

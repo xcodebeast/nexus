@@ -5,6 +5,7 @@ import type {
   ErrorPayload,
   IceServerConfig,
   LoginRequest,
+  RtcConfigurationPayload,
   RoomUser,
   ServerEvent,
   SessionPayload,
@@ -15,13 +16,21 @@ const ROOM_ID = process.env.NEXUS_ROOM_ID ?? "main";
 const ROOM_TOPIC = `room:${ROOM_ID}`;
 const DEFAULT_PASSWORD = process.env.NEXUS_PASSWORD ?? "nexus";
 const CONFIGURED_PASSWORD_HASH = process.env.NEXUS_PASSWORD_HASH?.trim();
+const CLOUDFLARE_TURN_KEY_ID = process.env.CLOUDFLARE_TURN_KEY_ID?.trim();
+const CLOUDFLARE_TURN_API_TOKEN =
+  process.env.CLOUDFLARE_TURN_API_TOKEN?.trim();
+const CLOUDFLARE_TURN_TTL_SECONDS = parseCloudflareTurnTtlSeconds();
+const CLOUDFLARE_TURN_MOCK_ICE_SERVERS = parseMockIceServers();
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
 const HOSTNAME = process.env.HOST ?? "0.0.0.0";
+const RTC_CONFIGURATION_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
 interface SessionRecord {
   id: string;
   username: string;
   createdAt: number;
+  rtcConfiguration: RtcConfigurationPayload;
+  rtcConfigurationExpiresAt: number | null;
 }
 
 interface ParticipantRecord extends RoomUser {}
@@ -33,7 +42,7 @@ interface SocketData {
 const sessions = new Map<string, SessionRecord>();
 const participants = new Map<string, ParticipantRecord>();
 const sockets = new Map<string, ServerWebSocket<SocketData>>();
-const rtcConfiguration = buildRtcConfiguration();
+const defaultRtcConfiguration = buildStaticRtcConfiguration();
 const verifyPassword = await buildPasswordVerifier();
 
 function hasTurnRelayConfigured(iceServers: IceServerConfig[]) {
@@ -65,7 +74,54 @@ async function buildPasswordVerifier() {
   return async (password: string) => password === DEFAULT_PASSWORD;
 }
 
-function buildRtcConfiguration() {
+function parseCloudflareTurnTtlSeconds() {
+  const ttl = Number.parseInt(
+    process.env.CLOUDFLARE_TURN_TTL_SECONDS ?? "86400",
+    10,
+  );
+
+  if (!Number.isFinite(ttl)) {
+    return 86400;
+  }
+
+  return Math.max(60, Math.min(ttl, 172800));
+}
+
+function parseMockIceServers() {
+  const payload = process.env.CLOUDFLARE_TURN_MOCK_ICE_SERVERS?.trim();
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(payload) as
+      | {
+          iceServers?: IceServerConfig[];
+        }
+      | IceServerConfig[];
+    const iceServers = Array.isArray(parsed) ? parsed : parsed.iceServers;
+
+    if (!Array.isArray(iceServers)) {
+      throw new Error("Missing iceServers array.");
+    }
+
+    return iceServers;
+  } catch (error) {
+    console.warn(
+      `Invalid CLOUDFLARE_TURN_MOCK_ICE_SERVERS; ignoring mock (${error instanceof Error ? error.message : "unknown"}).`,
+    );
+    return null;
+  }
+}
+
+function buildRtcConfiguration(iceServers: IceServerConfig[]): RtcConfigurationPayload {
+  return {
+    iceServers,
+    iceCandidatePoolSize: 10,
+  };
+}
+
+function buildStaticRtcConfiguration() {
   const stunUrls = (process.env.NEXUS_STUN_URLS ??
     "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302")
     .split(",")
@@ -93,18 +149,127 @@ function buildRtcConfiguration() {
     });
   }
 
+  return buildRtcConfiguration(iceServers);
+}
+
+function hasCloudflareTurnConfigured() {
+  return Boolean(CLOUDFLARE_TURN_KEY_ID && CLOUDFLARE_TURN_API_TOKEN);
+}
+
+function hasIncompleteCloudflareTurnConfiguration() {
+  return Boolean(
+    (CLOUDFLARE_TURN_KEY_ID || CLOUDFLARE_TURN_API_TOKEN) &&
+      !hasCloudflareTurnConfigured(),
+  );
+}
+
+async function generateCloudflareRtcConfiguration() {
+  const mockIceServers = CLOUDFLARE_TURN_MOCK_ICE_SERVERS;
+  if (mockIceServers) {
+    return {
+      rtcConfiguration: buildRtcConfiguration(mockIceServers),
+      expiresAt: Date.now() + CLOUDFLARE_TURN_TTL_SECONDS * 1000,
+    };
+  }
+
+  const response = await fetch(
+    `https://rtc.live.cloudflare.com/v1/turn/keys/${CLOUDFLARE_TURN_KEY_ID}/credentials/generate-ice-servers`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CLOUDFLARE_TURN_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ttl: CLOUDFLARE_TURN_TTL_SECONDS,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Cloudflare TURN API returned ${response.status} ${response.statusText}.`,
+    );
+  }
+
+  const payload = (await response.json()) as {
+    iceServers?: IceServerConfig[];
+  };
+
+  if (!Array.isArray(payload.iceServers) || payload.iceServers.length === 0) {
+    throw new Error("Cloudflare TURN API returned no ice servers.");
+  }
+
   return {
-    iceServers,
-    iceCandidatePoolSize: 10,
+    rtcConfiguration: buildRtcConfiguration(payload.iceServers),
+    expiresAt: Date.now() + CLOUDFLARE_TURN_TTL_SECONDS * 1000,
   };
 }
 
-if (
+async function resolveRtcConfiguration() {
+  if (!hasCloudflareTurnConfigured()) {
+    return {
+      rtcConfiguration: defaultRtcConfiguration,
+      expiresAt: null,
+    };
+  }
+
+  try {
+    return await generateCloudflareRtcConfiguration();
+  } catch (error) {
+    console.warn(
+      `Failed to generate Cloudflare TURN credentials; falling back to static RTC configuration (${error instanceof Error ? error.message : "unknown"}).`,
+    );
+    return {
+      rtcConfiguration: defaultRtcConfiguration,
+      expiresAt: null,
+    };
+  }
+}
+
+function needsRtcConfigurationRefresh(session: SessionRecord) {
+  if (session.rtcConfigurationExpiresAt === null) {
+    return false;
+  }
+
+  const refreshThreshold = Math.min(
+    RTC_CONFIGURATION_REFRESH_BUFFER_MS,
+    Math.floor((CLOUDFLARE_TURN_TTL_SECONDS * 1000) / 2),
+  );
+
+  return session.rtcConfigurationExpiresAt - Date.now() <= refreshThreshold;
+}
+
+async function ensureSessionRtcConfiguration(session: SessionRecord) {
+  if (!needsRtcConfigurationRefresh(session)) {
+    return session;
+  }
+
+  const nextRtcConfiguration = await resolveRtcConfiguration();
+  const nextSession: SessionRecord = {
+    ...session,
+    rtcConfiguration: nextRtcConfiguration.rtcConfiguration,
+    rtcConfigurationExpiresAt: nextRtcConfiguration.expiresAt,
+  };
+
+  sessions.set(session.id, nextSession);
+  return nextSession;
+}
+
+if (process.env.NODE_ENV === "production" && hasIncompleteCloudflareTurnConfiguration()) {
+  console.warn(
+    "Cloudflare TURN is partially configured. Set both CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_API_TOKEN or remove them.",
+  );
+}
+
+if (process.env.NODE_ENV === "production" && hasCloudflareTurnConfigured()) {
+  console.info("Cloudflare TURN is enabled via generated ICE credentials.");
+} else if (
   process.env.NODE_ENV === "production" &&
-  !hasTurnRelayConfigured(rtcConfiguration.iceServers)
+  !hasTurnRelayConfigured(defaultRtcConfiguration.iceServers)
 ) {
   console.warn(
-    "TURN relay is not configured. Voice calls can fail between users on different networks. Set NEXUS_TURN_URLS, NEXUS_TURN_USERNAME, and NEXUS_TURN_CREDENTIAL for production.",
+    "TURN relay is not configured. Voice calls can fail between users on different networks. Set Cloudflare TURN credentials or NEXUS_TURN_URLS, NEXUS_TURN_USERNAME, and NEXUS_TURN_CREDENTIAL for production.",
   );
 }
 
@@ -156,7 +321,7 @@ function toSessionPayload(session: SessionRecord): SessionPayload {
       username: session.username,
     },
     roomId: ROOM_ID,
-    rtcConfiguration,
+    rtcConfiguration: session.rtcConfiguration,
   };
 }
 
@@ -232,10 +397,14 @@ async function handleCreateSession(request: Request) {
     destroySession(existingSession.id, 4000, "Session replaced");
   }
 
+  const nextRtcConfiguration = await resolveRtcConfiguration();
+
   const session: SessionRecord = {
     id: crypto.randomUUID(),
     username,
     createdAt: Date.now(),
+    rtcConfiguration: nextRtcConfiguration.rtcConfiguration,
+    rtcConfigurationExpiresAt: nextRtcConfiguration.expiresAt,
   };
 
   sessions.set(session.id, session);
@@ -247,13 +416,14 @@ async function handleCreateSession(request: Request) {
   });
 }
 
-function handleGetSession(request: Request) {
+async function handleGetSession(request: Request) {
   const session = getSessionFromRequest(request);
   if (!session) {
     return errorResponse(401, "No active session.");
   }
 
-  return json(toSessionPayload(session));
+  const nextSession = await ensureSessionRtcConfiguration(session);
+  return json(toSessionPayload(nextSession));
 }
 
 function handleDeleteSession(request: Request) {
@@ -270,20 +440,25 @@ function handleDeleteSession(request: Request) {
   });
 }
 
-function handleWebSocketUpgrade(request: Request, server: Bun.Server<SocketData>) {
+async function handleWebSocketUpgrade(
+  request: Request,
+  server: Bun.Server<SocketData>,
+) {
   const session = getSessionFromRequest(request);
   if (!session) {
     return errorResponse(401, "No active session.");
   }
 
-  const existingSocket = sockets.get(session.id);
+  const nextSession = await ensureSessionRtcConfiguration(session);
+
+  const existingSocket = sockets.get(nextSession.id);
   if (existingSocket) {
     existingSocket.close(4002, "Duplicate connection");
   }
 
   const upgraded = server.upgrade(request, {
     data: {
-      sessionId: session.id,
+      sessionId: nextSession.id,
     },
   });
 
@@ -346,7 +521,7 @@ const server = serve<SocketData>({
           selfUserId: session.id,
           roomId: ROOM_ID,
           users: getSortedUsers(),
-          rtcConfiguration,
+          rtcConfiguration: session.rtcConfiguration,
         } satisfies ServerEvent),
       );
       broadcast({
