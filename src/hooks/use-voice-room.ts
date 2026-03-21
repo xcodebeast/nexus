@@ -21,6 +21,27 @@ function sortUsers(users: RoomUser[]) {
   return [...users].sort((left, right) => left.connectedAt - right.connectedAt);
 }
 
+function hasTurnRelay(rtcConfiguration: RTCConfiguration) {
+  return (rtcConfiguration.iceServers ?? []).some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some(
+      (url) => typeof url === "string" && /^(turn|turns):/i.test(url),
+    );
+  });
+}
+
+function getRemotePlaybackBlockedMessage() {
+  return "Remote audio is waiting for a browser interaction. Click anywhere or use a control to resume playback.";
+}
+
+function getPeerConnectionFailedMessage(hasTurnRelayConfigured: boolean) {
+  if (!hasTurnRelayConfigured) {
+    return "Peer audio connection failed. TURN relay is not configured, so callers on different networks may not hear each other.";
+  }
+
+  return "Peer audio connection failed. Check network access and reconnect.";
+}
+
 function getMicrophoneUnavailableMessage() {
   const isLocalhost =
     window.location.hostname === "localhost" ||
@@ -38,7 +59,8 @@ export function useVoiceRoom() {
   const [isMuted, setIsMuted] = useState(false);
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("requesting-media");
-  const [error, setError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [mediaError, setMediaError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const selfUserIdRef = useRef<string | null>(null);
@@ -56,6 +78,9 @@ export function useVoiceRoom() {
   const manualDisconnectRef = useRef(false);
   const isMutedRef = useRef(false);
   const speakingRef = useRef(false);
+  const hasTurnRelayRef = useRef(false);
+  const failedPeersRef = useRef(new Set<string>());
+  const blockedAudioPeersRef = useRef(new Set<string>());
 
   function sendEvent(event: ClientEvent) {
     const ws = wsRef.current;
@@ -117,6 +142,70 @@ export function useVoiceRoom() {
     }
   }
 
+  function syncMediaError() {
+    if (blockedAudioPeersRef.current.size > 0) {
+      setMediaError(getRemotePlaybackBlockedMessage());
+      return;
+    }
+
+    if (failedPeersRef.current.size > 0) {
+      setMediaError(getPeerConnectionFailedMessage(hasTurnRelayRef.current));
+      return;
+    }
+
+    setMediaError(null);
+  }
+
+  function clearPeerFailure(peerId: string) {
+    if (!failedPeersRef.current.delete(peerId)) {
+      return;
+    }
+
+    syncMediaError();
+  }
+
+  function markPeerFailure(peerId: string) {
+    failedPeersRef.current.add(peerId);
+    syncMediaError();
+  }
+
+  function clearBlockedAudio(peerId: string) {
+    if (!blockedAudioPeersRef.current.delete(peerId)) {
+      return;
+    }
+
+    syncMediaError();
+  }
+
+  async function tryPlayRemoteAudio(peerId: string, audio: HTMLAudioElement) {
+    try {
+      await audio.play();
+      clearBlockedAudio(peerId);
+    } catch (cause) {
+      if (
+        cause instanceof DOMException &&
+        cause.name === "NotAllowedError"
+      ) {
+        blockedAudioPeersRef.current.add(peerId);
+        syncMediaError();
+      }
+    }
+  }
+
+  function retryBlockedAudioPlayback() {
+    for (const peerId of [...blockedAudioPeersRef.current]) {
+      const audio = audioElementsRef.current.get(peerId);
+      if (!audio) {
+        blockedAudioPeersRef.current.delete(peerId);
+        continue;
+      }
+
+      void tryPlayRemoteAudio(peerId, audio);
+    }
+
+    syncMediaError();
+  }
+
   function attachRemoteStream(peerId: string, stream: MediaStream) {
     let audio = audioElementsRef.current.get(peerId);
 
@@ -132,13 +221,16 @@ export function useVoiceRoom() {
 
     if (audio.srcObject !== stream) {
       audio.srcObject = stream;
-      void audio.play().catch(() => {
-        return;
-      });
     }
+
+    clearPeerFailure(peerId);
+    void tryPlayRemoteAudio(peerId, audio);
   }
 
-  function cleanupPeer(peerId: string) {
+  function cleanupPeer(
+    peerId: string,
+    options: { preserveFailure?: boolean } = {},
+  ) {
     const peer = peerConnectionsRef.current.get(peerId);
     if (peer) {
       peer.close();
@@ -146,6 +238,11 @@ export function useVoiceRoom() {
     }
 
     pendingIceCandidatesRef.current.delete(peerId);
+    blockedAudioPeersRef.current.delete(peerId);
+    if (!options.preserveFailure) {
+      failedPeersRef.current.delete(peerId);
+    }
+    syncMediaError();
 
     const audio = audioElementsRef.current.get(peerId);
     if (audio) {
@@ -209,8 +306,42 @@ export function useVoiceRoom() {
       attachRemoteStream(peerId, new MediaStream([event.track]));
     };
 
+    peer.oniceconnectionstatechange = () => {
+      if (peerConnectionsRef.current.get(peerId) !== peer) {
+        return;
+      }
+
+      if (
+        peer.iceConnectionState === "connected" ||
+        peer.iceConnectionState === "completed"
+      ) {
+        clearPeerFailure(peerId);
+        return;
+      }
+
+      if (peer.iceConnectionState === "failed") {
+        markPeerFailure(peerId);
+        cleanupPeer(peerId, { preserveFailure: true });
+      }
+    };
+
     peer.onconnectionstatechange = () => {
-      if (peer.connectionState === "failed" || peer.connectionState === "closed") {
+      if (peerConnectionsRef.current.get(peerId) !== peer) {
+        return;
+      }
+
+      if (peer.connectionState === "connected") {
+        clearPeerFailure(peerId);
+        return;
+      }
+
+      if (peer.connectionState === "failed") {
+        markPeerFailure(peerId);
+        cleanupPeer(peerId, { preserveFailure: true });
+        return;
+      }
+
+      if (peer.connectionState === "closed") {
         cleanupPeer(peerId);
       }
     };
@@ -294,6 +425,7 @@ export function useVoiceRoom() {
     if (event.type === "room:snapshot") {
       selfUserIdRef.current = event.selfUserId;
       rtcConfigurationRef.current = event.rtcConfiguration as RTCConfiguration;
+      hasTurnRelayRef.current = hasTurnRelay(rtcConfigurationRef.current);
       setUsers(sortUsers(event.users));
 
       for (const user of event.users) {
@@ -319,6 +451,7 @@ export function useVoiceRoom() {
     }
 
     if (event.type === "room:user-left") {
+      clearPeerFailure(event.userId);
       cleanupPeer(event.userId);
       removeUser(event.userId);
       return;
@@ -328,12 +461,12 @@ export function useVoiceRoom() {
       try {
         await handleSignal(event.fromUserId, event.signal);
       } catch {
-        setError("Peer connection renegotiation failed.");
+        setConnectionError("Peer connection renegotiation failed.");
       }
       return;
     }
 
-    setError(event.message);
+    setConnectionError(event.message);
   }
 
   function stopSpeechDetection() {
@@ -409,6 +542,9 @@ export function useVoiceRoom() {
     selfUserIdRef.current = null;
     pendingIceCandidatesRef.current.clear();
     speakingRef.current = false;
+    blockedAudioPeersRef.current.clear();
+    failedPeersRef.current.clear();
+    setMediaError(null);
   }
 
   useEffect(() => {
@@ -418,7 +554,9 @@ export function useVoiceRoom() {
     async function connect() {
       try {
         setConnectionState("requesting-media");
-        setError(null);
+        setConnectionError(null);
+        setMediaError(null);
+        hasTurnRelayRef.current = false;
 
         if (!navigator.mediaDevices?.getUserMedia) {
           throw new Error(getMicrophoneUnavailableMessage());
@@ -465,13 +603,13 @@ export function useVoiceRoom() {
             const payload = JSON.parse(event.data) as ServerEvent;
             void handleServerEvent(payload);
           } catch {
-            setError("Unexpected realtime payload.");
+            setConnectionError("Unexpected realtime payload.");
           }
         });
 
         ws.addEventListener("error", () => {
           if (isActive) {
-            setError("Realtime connection failed.");
+            setConnectionError("Realtime connection failed.");
           }
         });
 
@@ -481,7 +619,7 @@ export function useVoiceRoom() {
           }
 
           setConnectionState("disconnected");
-          setError("Realtime connection lost.");
+          setConnectionError("Realtime connection lost.");
         });
       } catch (cause) {
         if (!isActive) {
@@ -489,7 +627,7 @@ export function useVoiceRoom() {
         }
 
         setConnectionState("disconnected");
-        setError(
+        setConnectionError(
           cause instanceof Error
             ? cause.message
             : "Microphone access is required to join the room.",
@@ -503,6 +641,22 @@ export function useVoiceRoom() {
       isActive = false;
       manualDisconnectRef.current = true;
       teardownRoomConnection();
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleUserInteraction = () => {
+      queueMicrotask(() => {
+        retryBlockedAudioPlayback();
+      });
+    };
+
+    window.addEventListener("click", handleUserInteraction, true);
+    window.addEventListener("keydown", handleUserInteraction, true);
+
+    return () => {
+      window.removeEventListener("click", handleUserInteraction, true);
+      window.removeEventListener("keydown", handleUserInteraction, true);
     };
   }, []);
 
@@ -532,7 +686,7 @@ export function useVoiceRoom() {
     selfUserId: selfUserIdRef.current,
     isMuted,
     connectionState,
-    error,
+    error: connectionError ?? mediaError,
     toggleMute,
     disconnect,
   };

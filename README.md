@@ -113,6 +113,7 @@ Optional environment variables:
 If `NEXUS_PASSWORD_HASH` is empty, malformed, or uses an unsupported algorithm, the server falls back to `NEXUS_PASSWORD`.
 
 For production reliability across restrictive NATs, configure TURN credentials. STUN-only setups are usually enough for local development but not enough for every real network.
+If users can see each other's speaking glow but hear no audio, the signaling path is working and the media path is likely failing. The most common production cause is missing TURN relay configuration.
 
 ## License
 

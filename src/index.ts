@@ -36,6 +36,15 @@ const sockets = new Map<string, ServerWebSocket<SocketData>>();
 const rtcConfiguration = buildRtcConfiguration();
 const verifyPassword = await buildPasswordVerifier();
 
+function hasTurnRelayConfigured(iceServers: IceServerConfig[]) {
+  return iceServers.some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some(
+      (url) => typeof url === "string" && /^(turn|turns):/i.test(url),
+    );
+  });
+}
+
 async function buildPasswordVerifier() {
   if (CONFIGURED_PASSWORD_HASH) {
     try {
@@ -88,6 +97,15 @@ function buildRtcConfiguration() {
     iceServers,
     iceCandidatePoolSize: 10,
   };
+}
+
+if (
+  process.env.NODE_ENV === "production" &&
+  !hasTurnRelayConfigured(rtcConfiguration.iceServers)
+) {
+  console.warn(
+    "TURN relay is not configured. Voice calls can fail between users on different networks. Set NEXUS_TURN_URLS, NEXUS_TURN_USERNAME, and NEXUS_TURN_CREDENTIAL for production.",
+  );
 }
 
 function json<T>(payload: T, init: ResponseInit = {}) {

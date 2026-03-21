@@ -1,4 +1,19 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Browser, type Page } from "@playwright/test";
+
+async function createVoiceContext(
+  browser: Browser,
+  initScript?: () => void,
+) {
+  const context = await browser.newContext({
+    permissions: ["microphone"],
+  });
+
+  if (initScript) {
+    await context.addInitScript(initScript);
+  }
+
+  return context;
+}
 
 async function login(page: Page, username: string) {
   await page.goto("/?skipIntro=1");
@@ -14,15 +29,98 @@ async function login(page: Page, username: string) {
   await expect(page.getByRole("button", { name: /disconnect/i })).toBeVisible();
 }
 
+async function expectRemoteAudioPlaying(page: Page) {
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        const audio = document.querySelector("audio");
+        if (!(audio instanceof HTMLAudioElement)) {
+          return null;
+        }
+
+        const stream = audio.srcObject;
+        return {
+          paused: audio.paused,
+          hasSrcObject: stream instanceof MediaStream,
+          trackCount:
+            stream instanceof MediaStream ? stream.getAudioTracks().length : 0,
+        };
+      });
+    })
+    .toEqual({
+      paused: false,
+      hasSrcObject: true,
+      trackCount: 1,
+    });
+}
+
+function installAutoplayBlocker() {
+  let interactionToken = 0;
+
+  document.addEventListener(
+    "pointerdown",
+    () => {
+      interactionToken += 1;
+    },
+    true,
+  );
+  document.addEventListener(
+    "keydown",
+    () => {
+      interactionToken += 1;
+    },
+    true,
+  );
+
+  const originalPlay = HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function (...args) {
+    if (!(this instanceof HTMLAudioElement) || !this.dataset.peerId) {
+      return originalPlay.apply(this, args);
+    }
+
+    const blockedToken = Number(this.dataset.blockedInteractionToken ?? "-1");
+    if (!this.dataset.autoplayBlockedOnce) {
+      this.dataset.autoplayBlockedOnce = "true";
+      this.dataset.blockedInteractionToken = String(interactionToken);
+      return Promise.reject(
+        new DOMException("Blocked remote audio", "NotAllowedError"),
+      );
+    }
+
+    if (interactionToken <= blockedToken) {
+      return Promise.reject(
+        new DOMException("Blocked remote audio", "NotAllowedError"),
+      );
+    }
+
+    return originalPlay.apply(this, args);
+  };
+}
+
+function installPeerTracker() {
+  const OriginalPeerConnection = window.RTCPeerConnection;
+  const trackedPeers: RTCPeerConnection[] = [];
+  Object.defineProperty(window, "__nexusPeerConnections", {
+    configurable: true,
+    value: trackedPeers,
+  });
+
+  class TrackingPeerConnection extends OriginalPeerConnection {
+    constructor(configuration?: RTCConfiguration) {
+      super(configuration);
+      trackedPeers.push(this);
+    }
+  }
+
+  Object.setPrototypeOf(TrackingPeerConnection, OriginalPeerConnection);
+  window.RTCPeerConnection = TrackingPeerConnection;
+}
+
 test("authenticates and synchronizes room presence between two clients", async ({
   browser,
 }) => {
-  const aliceContext = await browser.newContext({
-    permissions: ["microphone"],
-  });
-  const bobContext = await browser.newContext({
-    permissions: ["microphone"],
-  });
+  const aliceContext = await createVoiceContext(browser);
+  const bobContext = await createVoiceContext(browser);
 
   const alicePage = await aliceContext.newPage();
   const bobPage = await bobContext.newPage();
@@ -37,9 +135,76 @@ test("authenticates and synchronizes room presence between two clients", async (
   await expect(bobPage.getByText("Alice")).toBeVisible();
   await expect(alicePage.getByText(/2 connected/i)).toBeVisible();
   await expect(alicePage.getByText("Bob")).toBeVisible();
+  await expectRemoteAudioPlaying(alicePage);
+  await expectRemoteAudioPlaying(bobPage);
 
   await bobPage.getByRole("button", { name: /disconnect/i }).click();
   await expect(alicePage.getByText(/1 connected/i)).toBeVisible();
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
+test("retries blocked remote audio playback after the next user interaction", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, installAutoplayBlocker);
+  const bobContext = await createVoiceContext(browser, installAutoplayBlocker);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+
+  await expect(
+    alicePage.getByText(/remote audio is waiting for a browser interaction/i),
+  ).toBeVisible();
+
+  await alicePage.mouse.click(10, 10);
+  await expect(
+    alicePage.getByText(/remote audio is waiting for a browser interaction/i),
+  ).toBeHidden();
+  await expectRemoteAudioPlaying(alicePage);
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
+test("shows a TURN-focused error when the peer audio connection fails", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, installPeerTracker);
+  const bobContext = await createVoiceContext(browser, installPeerTracker);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+  await expectRemoteAudioPlaying(alicePage);
+
+  await alicePage.evaluate(() => {
+    const peer = (window as Window & { __nexusPeerConnections?: RTCPeerConnection[] })
+      .__nexusPeerConnections?.[0];
+    if (!peer) {
+      throw new Error("Missing tracked peer connection.");
+    }
+
+    Object.defineProperty(peer, "connectionState", {
+      configurable: true,
+      get: () => "failed",
+    });
+    Object.defineProperty(peer, "iceConnectionState", {
+      configurable: true,
+      get: () => "failed",
+    });
+
+    peer.dispatchEvent(new Event("iceconnectionstatechange"));
+    peer.dispatchEvent(new Event("connectionstatechange"));
+  });
+
+  await expect(
+    alicePage.getByText(/TURN relay is not configured/i),
+  ).toBeVisible();
 
   await aliceContext.close();
   await bobContext.close();
