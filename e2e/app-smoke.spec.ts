@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { appConfig } from "../src/lib/config";
 
 async function createVoiceContext(
   browser: Browser,
@@ -27,6 +28,26 @@ async function login(page: Page, username: string) {
   await page.getByLabel("Password").fill("nexus");
   await page.getByRole("button", { name: /authenticate/i }).click();
   await expect(page.getByRole("button", { name: /disconnect/i })).toBeVisible();
+}
+
+async function measureIntroDuration(page: Page) {
+  const connectButton = page.getByRole("button", { name: /connect/i });
+  const startTime = Date.now();
+
+  await expect(connectButton).toBeVisible({
+    timeout: appConfig.introAnimation.firstVisitDurationMs + 2_000,
+  });
+
+  return Date.now() - startTime;
+}
+
+async function measureConnectScreenAppearance(page: Page) {
+  const connectButton = page.getByRole("button", { name: /connect/i });
+  const startTime = Date.now();
+
+  await expect(connectButton).toBeVisible({ timeout: 1_500 });
+
+  return Date.now() - startTime;
 }
 
 async function expectRemoteAudioPlaying(page: Page) {
@@ -149,6 +170,32 @@ function installPeerTracker() {
   Object.setPrototypeOf(TrackingPeerConnection, OriginalPeerConnection);
   window.RTCPeerConnection = TrackingPeerConnection;
 }
+
+test("skips the dedicated intro after the first visit", async ({ browser }) => {
+  const context = await createVoiceContext(browser);
+  const page = await context.newPage();
+
+  await page.goto("/");
+  const firstVisitDurationMs = await measureIntroDuration(page);
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => window.localStorage.getItem(storageKey),
+        appConfig.introAnimation.seenStorageKey,
+      ),
+    )
+    .toBe("true");
+
+  await page.reload();
+  const repeatVisitDurationMs = await measureConnectScreenAppearance(page);
+
+  await expect(page.getByText(/^NEXUS$/)).toHaveCount(1);
+  expect(firstVisitDurationMs).toBeGreaterThan(3_000);
+  expect(repeatVisitDurationMs).toBeLessThan(1_500);
+
+  await context.close();
+});
 
 test("authenticates and synchronizes room presence between two clients", async ({
   browser,

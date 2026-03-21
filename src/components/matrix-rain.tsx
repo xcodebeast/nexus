@@ -1,22 +1,39 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { appConfig } from "@/lib/config";
 
 interface MatrixRainProps {
   introMode?: boolean;
+  introDurationMs?: number;
   onIntroComplete?: () => void;
 }
 
-export function MatrixRain({ introMode = false, onIntroComplete }: MatrixRainProps) {
+const INTRO_OPACITY = 1;
+const INTRO_HOLD_RATIO = 0.7;
+
+export function MatrixRain({
+  introMode = false,
+  introDurationMs = appConfig.introAnimation.firstVisitDurationMs,
+  onIntroComplete,
+}: MatrixRainProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [opacity, setOpacity] = useState(introMode ? 1 : 0.15);
+  const [opacity, setOpacity] = useState(
+    introMode ? INTRO_OPACITY : appConfig.introAnimation.idleOpacity,
+  );
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      return;
+    }
 
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx) {
+      return;
+    }
+
+    setOpacity(introMode ? INTRO_OPACITY : appConfig.introAnimation.idleOpacity);
 
     const resizeCanvas = () => {
       canvas.width = window.innerWidth;
@@ -63,35 +80,55 @@ export function MatrixRain({ introMode = false, onIntroComplete }: MatrixRainPro
     };
 
     const interval = setInterval(draw, 33);
+    let introTimer: number | undefined;
+    let fadeAnimationFrame: number | undefined;
 
-    // Intro animation - fade out after delay
     if (introMode && onIntroComplete) {
-      const introTimer = setTimeout(() => {
-        // Smooth fade transition
-        let currentOpacity = 1;
-        const fadeInterval = setInterval(() => {
-          currentOpacity -= 0.02;
-          if (currentOpacity <= 0.15) {
-            currentOpacity = 0.15;
-            clearInterval(fadeInterval);
-            onIntroComplete();
-          }
-          setOpacity(currentOpacity);
-        }, 30);
-      }, 3000);
+      const holdDurationMs = Math.max(
+        0,
+        Math.round(introDurationMs * INTRO_HOLD_RATIO),
+      );
+      const fadeDurationMs = Math.max(introDurationMs - holdDurationMs, 1);
 
-      return () => {
-        clearInterval(interval);
-        clearTimeout(introTimer);
-        window.removeEventListener("resize", resizeCanvas);
-      };
+      introTimer = window.setTimeout(() => {
+        const fadeStartTime = performance.now();
+
+        const animateFade = (timestamp: number) => {
+          const progress = Math.min(
+            (timestamp - fadeStartTime) / fadeDurationMs,
+            1,
+          );
+          const nextOpacity =
+            INTRO_OPACITY -
+            progress *
+              (INTRO_OPACITY - appConfig.introAnimation.idleOpacity);
+
+          setOpacity(nextOpacity);
+
+          if (progress < 1) {
+            fadeAnimationFrame = window.requestAnimationFrame(animateFade);
+            return;
+          }
+
+          setOpacity(appConfig.introAnimation.idleOpacity);
+          onIntroComplete();
+        };
+
+        fadeAnimationFrame = window.requestAnimationFrame(animateFade);
+      }, holdDurationMs);
     }
 
     return () => {
       clearInterval(interval);
+      if (introTimer !== undefined) {
+        window.clearTimeout(introTimer);
+      }
+      if (fadeAnimationFrame !== undefined) {
+        window.cancelAnimationFrame(fadeAnimationFrame);
+      }
       window.removeEventListener("resize", resizeCanvas);
     };
-  }, [introMode, onIntroComplete]);
+  }, [introDurationMs, introMode, onIntroComplete]);
 
   return (
     <canvas

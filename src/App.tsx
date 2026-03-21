@@ -6,6 +6,7 @@ import { LoginModal } from "@/components/login-modal";
 import { VoiceRoom } from "@/components/voice-room";
 import { Button } from "@/components/ui/button";
 import { createSession, deleteSession, getSession } from "@/lib/api";
+import { appConfig } from "@/lib/config";
 
 type AppState = "intro" | "connect" | "room";
 
@@ -16,17 +17,44 @@ function shouldSkipIntro() {
   );
 }
 
+function hasSeenIntro() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return (
+      window.localStorage.getItem(appConfig.introAnimation.seenStorageKey) === "true"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function markIntroAsSeen() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(appConfig.introAnimation.seenStorageKey, "true");
+  } catch {
+    return;
+  }
+}
+
 export function App() {
+  const shouldBypassIntro = shouldSkipIntro() || hasSeenIntro();
   const [appState, setAppState] = useState<AppState>(() =>
-    shouldSkipIntro() ? "connect" : "intro",
+    shouldBypassIntro ? "connect" : "intro",
   );
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [savedUsername, setSavedUsername] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<string | null>(null);
-  const [introComplete, setIntroComplete] = useState(() => shouldSkipIntro());
+  const [introComplete, setIntroComplete] = useState(() => shouldBypassIntro);
 
   useEffect(() => {
-    const stored = localStorage.getItem("nexus-username");
+    const stored = localStorage.getItem(appConfig.storage.usernameKey);
     if (stored) {
       setSavedUsername(stored);
     }
@@ -37,7 +65,7 @@ export function App() {
           return;
         }
 
-        localStorage.setItem("nexus-username", session.user.username);
+        localStorage.setItem(appConfig.storage.usernameKey, session.user.username);
         setSavedUsername(session.user.username);
         setCurrentUser(session.user.username);
       })
@@ -55,6 +83,7 @@ export function App() {
   }, [currentUser, introComplete]);
 
   const handleIntroComplete = () => {
+    markIntroAsSeen();
     setIntroComplete(true);
     setAppState(currentUser ? "room" : "connect");
   };
@@ -65,7 +94,7 @@ export function App() {
 
   const handleLogin = async (username: string, password: string) => {
     const session = await createSession({ username, password });
-    localStorage.setItem("nexus-username", session.user.username);
+    localStorage.setItem(appConfig.storage.usernameKey, session.user.username);
     setSavedUsername(session.user.username);
     setCurrentUser(session.user.username);
     setShowLoginModal(false);
