@@ -32,6 +32,20 @@ async function login(page: Page, username: string) {
   await expect(page.getByRole("button", { name: /disconnect/i })).toBeVisible();
 }
 
+async function expectRoomPresence(
+  page: Page,
+  connectionCount: number,
+  usernames: string[],
+) {
+  await expect(
+    page.getByText(new RegExp(`${connectionCount} connected`, "i")),
+  ).toBeVisible();
+
+  for (const username of usernames) {
+    await expect(page.getByText(username)).toBeVisible();
+  }
+}
+
 async function measureIntroDuration(page: Page) {
   const connectButton = page.getByRole("button", { name: /connect/i });
   const startTime = Date.now();
@@ -276,6 +290,25 @@ function installPeerTracker() {
   window.RTCPeerConnection = TrackingPeerConnection;
 }
 
+function installWebSocketTracker() {
+  const OriginalWebSocket = window.WebSocket;
+  const trackedSockets: WebSocket[] = [];
+  Object.defineProperty(window, "__nexusSockets", {
+    configurable: true,
+    value: trackedSockets,
+  });
+
+  class TrackingWebSocket extends OriginalWebSocket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols);
+      trackedSockets.push(this);
+    }
+  }
+
+  Object.setPrototypeOf(TrackingWebSocket, OriginalWebSocket);
+  window.WebSocket = TrackingWebSocket;
+}
+
 function installAudioWorkletPassThrough() {
   const audioWorkletState = {
     addModuleCallCount: 0,
@@ -457,35 +490,90 @@ test("skips the dedicated intro after the first visit", async ({ browser }) => {
   await context.close();
 });
 
-test("authenticates and synchronizes room presence between two clients", async ({
+test("authenticates and synchronizes room presence across three clients", async ({
   browser,
 }) => {
   const aliceContext = await createVoiceContext(browser);
   const bobContext = await createVoiceContext(browser);
+  const carolContext = await createVoiceContext(browser);
 
   const alicePage = await aliceContext.newPage();
   const bobPage = await bobContext.newPage();
+  const carolPage = await carolContext.newPage();
 
   await login(alicePage, "Alice");
-  await expect(alicePage.getByText(/1 connected/i)).toBeVisible();
-  await expect(alicePage.getByText("Alice (YOU)")).toBeVisible();
+  await expectRoomPresence(alicePage, 1, ["Alice (YOU)"]);
 
   await login(bobPage, "Bob");
-  await expect(bobPage.getByText(/2 connected/i)).toBeVisible();
-  await expect(bobPage.getByText("Bob (YOU)")).toBeVisible();
-  await expect(bobPage.getByText("Alice")).toBeVisible();
-  await expect(alicePage.getByText(/2 connected/i)).toBeVisible();
-  await expect(alicePage.getByText("Bob")).toBeVisible();
+  await expectRoomPresence(bobPage, 2, ["Bob (YOU)", "Alice"]);
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Bob"]);
   await expectGeneratedTurnConfig(alicePage);
   await expectGeneratedTurnConfig(bobPage);
   await expectRemoteAudioPlaying(alicePage);
   await expectRemoteAudioPlaying(bobPage);
 
+  await login(carolPage, "Carol");
+  await expectRoomPresence(carolPage, 3, ["Carol (YOU)", "Alice", "Bob"]);
+  await expectRoomPresence(alicePage, 3, ["Alice (YOU)", "Bob", "Carol"]);
+  await expectRoomPresence(bobPage, 3, ["Bob (YOU)", "Alice", "Carol"]);
+  await expectGeneratedTurnConfig(carolPage);
+  await expectRemoteAudioPlaying(carolPage);
+
   await bobPage.getByRole("button", { name: /disconnect/i }).click();
-  await expect(alicePage.getByText(/1 connected/i)).toBeVisible();
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Carol"]);
+  await expectRoomPresence(carolPage, 2, ["Carol (YOU)", "Alice"]);
 
   await aliceContext.close();
   await bobContext.close();
+  await carolContext.close();
+});
+
+test("reconnects a dropped realtime client back into a three-user room", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [installWebSocketTracker]);
+  const bobContext = await createVoiceContext(browser, [installWebSocketTracker]);
+  const carolContext = await createVoiceContext(browser, [installWebSocketTracker]);
+
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+  const carolPage = await carolContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+  await login(carolPage, "Carol");
+
+  await expectRoomPresence(alicePage, 3, ["Alice (YOU)", "Bob", "Carol"]);
+  await expectRoomPresence(bobPage, 3, ["Bob (YOU)", "Alice", "Carol"]);
+  await expectRoomPresence(carolPage, 3, ["Carol (YOU)", "Alice", "Bob"]);
+
+  await carolPage.evaluate(() => {
+    const sockets = (
+      window as Window & {
+        __nexusSockets?: WebSocket[];
+      }
+    ).__nexusSockets;
+    const socket = [...(sockets ?? [])]
+      .reverse()
+      .find((candidate) => candidate.url.includes("/api/ws"));
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error("Missing tracked room websocket.");
+    }
+
+    socket.close(4005, "Simulated realtime drop");
+  });
+
+  await expect(
+    carolPage.getByText(/realtime connection lost\. reconnecting/i),
+  ).toBeVisible();
+  await expectRoomPresence(carolPage, 3, ["Carol (YOU)", "Alice", "Bob"]);
+  await expectRoomPresence(alicePage, 3, ["Alice (YOU)", "Bob", "Carol"]);
+  await expectRoomPresence(bobPage, 3, ["Bob (YOU)", "Alice", "Carol"]);
+  await expectRemoteAudioPlaying(carolPage);
+
+  await aliceContext.close();
+  await bobContext.close();
+  await carolContext.close();
 });
 
 test("initializes RNNoise without showing a mic mode label", async ({

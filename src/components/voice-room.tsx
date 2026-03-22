@@ -19,6 +19,7 @@ interface VoiceRoomProps {
 function getStatusLabel(connectionState: string) {
   if (connectionState === "requesting-media") return "Requesting microphone access";
   if (connectionState === "connecting") return "Establishing realtime channel";
+  if (connectionState === "reconnecting") return "Restoring realtime channel";
   if (connectionState === "disconnected") return "Realtime channel offline";
 
   return "Voice channel active";

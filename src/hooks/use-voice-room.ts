@@ -16,6 +16,7 @@ import {
 type ConnectionState =
   | "requesting-media"
   | "connecting"
+  | "reconnecting"
   | "connected"
   | "disconnected";
 
@@ -55,6 +56,18 @@ function getPeerConnectionFailedMessage(hasTurnRelayConfigured: boolean) {
   }
 
   return "Peer audio connection failed. Check network access and reconnect.";
+}
+
+function getRealtimeReconnectingMessage() {
+  return "Realtime connection lost. Reconnecting...";
+}
+
+function getSessionUnavailableMessage() {
+  return "Realtime session expired. Reconnect from the access terminal.";
+}
+
+function getSessionTakenOverMessage() {
+  return "Realtime session moved to another browser tab or window.";
 }
 
 function getMicrophoneUnavailableMessage() {
@@ -144,6 +157,8 @@ export function useVoiceRoom() {
     iceServers: [],
   });
   const speechFrameRef = useRef<number | null>(null);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
   const manualDisconnectRef = useRef(false);
   const isMutedRef = useRef(false);
   const speakingRef = useRef(false);
@@ -946,9 +961,14 @@ export function useVoiceRoom() {
     speechFrameRef.current = requestAnimationFrame(tick);
   }
 
-  function teardownRoomConnection() {
-    stopSpeechDetection();
+  function clearReconnectTimeout() {
+    if (reconnectTimeoutRef.current !== null) {
+      window.clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+  }
 
+  function resetRealtimeState() {
     for (const peerId of [...peerConnectionsRef.current.keys()]) {
       cleanupAudioPeer(peerId);
     }
@@ -956,6 +976,29 @@ export function useVoiceRoom() {
     cleanupAllScreenPeers();
     stopLocalScreenCapture();
     setActiveScreenStreamState(null);
+
+    const selfUserId = selfUserIdRef.current;
+    setUsersState(
+      selfUserId
+        ? usersRef.current.filter((user) => user.id === selfUserId)
+        : [],
+    );
+    activeScreenShareUserIdRef.current = null;
+    setActiveScreenShareUserId(null);
+    pendingIceCandidatesRef.current.clear();
+    pendingScreenIceCandidatesRef.current.clear();
+    blockedAudioPeersRef.current.clear();
+    failedPeersRef.current.clear();
+    setMediaError(null);
+    setScreenShareError(null);
+    setScreenShareNotice(null);
+    setScreenShareStatusState(getInitialScreenShareStatus());
+  }
+
+  function teardownRoomConnection() {
+    clearReconnectTimeout();
+    stopSpeechDetection();
+    resetRealtimeState();
 
     const localAudio = localAudioRef.current;
     if (localAudio) {
@@ -969,13 +1012,7 @@ export function useVoiceRoom() {
     }
     wsRef.current = null;
     selfUserIdRef.current = null;
-    activeScreenShareUserIdRef.current = null;
-    setActiveScreenShareUserId(null);
-    pendingIceCandidatesRef.current.clear();
-    pendingScreenIceCandidatesRef.current.clear();
     speakingRef.current = false;
-    blockedAudioPeersRef.current.clear();
-    failedPeersRef.current.clear();
     setMediaError(null);
     setAudioProcessingMode("standard");
     setAudioProcessingReason("unsupported");
@@ -987,6 +1024,114 @@ export function useVoiceRoom() {
   useEffect(() => {
     let isActive = true;
     manualDisconnectRef.current = false;
+
+    function stopReconnectingWithMessage(message: string) {
+      clearReconnectTimeout();
+      reconnectAttemptsRef.current = 0;
+      resetRealtimeState();
+      setConnectionState("disconnected");
+      setConnectionError(message);
+    }
+
+    function scheduleReconnect() {
+      if (!isActive || manualDisconnectRef.current) {
+        return;
+      }
+
+      clearReconnectTimeout();
+      reconnectAttemptsRef.current += 1;
+      const reconnectDelayMs = Math.min(
+        1_000 * reconnectAttemptsRef.current,
+        5_000,
+      );
+
+      setConnectionState("reconnecting");
+      setConnectionError(getRealtimeReconnectingMessage());
+      reconnectTimeoutRef.current = window.setTimeout(() => {
+        void connectToRealtime();
+      }, reconnectDelayMs);
+    }
+
+    function handleUnexpectedSocketClose(
+      ws: WebSocket,
+      event: CloseEvent,
+    ) {
+      if (!isActive || manualDisconnectRef.current || wsRef.current !== ws) {
+        return;
+      }
+
+      wsRef.current = null;
+
+      if (event.code === 4000 || event.code === 4002) {
+        stopReconnectingWithMessage(getSessionTakenOverMessage());
+        return;
+      }
+
+      if (event.code === 4003 || event.code === 4004) {
+        stopReconnectingWithMessage(getSessionUnavailableMessage());
+        return;
+      }
+
+      resetRealtimeState();
+      scheduleReconnect();
+    }
+
+    function connectToRealtime() {
+      if (!isActive || manualDisconnectRef.current) {
+        return;
+      }
+
+      clearReconnectTimeout();
+      setConnectionState(
+        reconnectAttemptsRef.current > 0 ? "reconnecting" : "connecting",
+      );
+      if (reconnectAttemptsRef.current === 0) {
+        setConnectionError(null);
+      }
+
+      const ws = new WebSocket(buildWebSocketUrl("/api/ws"));
+      wsRef.current = ws;
+
+      ws.addEventListener("open", () => {
+        if (!isActive || wsRef.current !== ws) {
+          return;
+        }
+
+        reconnectAttemptsRef.current = 0;
+        setConnectionState("connected");
+        setConnectionError(null);
+        syncPresence(isMutedRef.current, speakingRef.current);
+      });
+
+      ws.addEventListener("message", (event) => {
+        if (wsRef.current !== ws || typeof event.data !== "string") {
+          return;
+        }
+
+        try {
+          const payload = JSON.parse(event.data) as ServerEvent;
+          void handleServerEvent(payload);
+        } catch {
+          setConnectionError("Unexpected realtime payload.");
+        }
+      });
+
+      ws.addEventListener("error", () => {
+        if (!isActive || wsRef.current !== ws) {
+          return;
+        }
+
+        if (ws.readyState === WebSocket.CLOSED) {
+          return;
+        }
+
+        setConnectionError(getRealtimeReconnectingMessage());
+      });
+
+      ws.addEventListener("close", (event) => {
+        handleUnexpectedSocketClose(ws, event);
+      });
+    }
 
     async function connect() {
       try {
@@ -1023,47 +1168,7 @@ export function useVoiceRoom() {
         localAudioRef.current = localAudio;
         setTrackMute(isMutedRef.current);
         startSpeechDetection(localAudio.analyser);
-        setConnectionState("connecting");
-
-        const ws = new WebSocket(buildWebSocketUrl("/api/ws"));
-        wsRef.current = ws;
-
-        ws.addEventListener("open", () => {
-          if (!isActive) {
-            return;
-          }
-
-          setConnectionState("connected");
-          syncPresence(isMutedRef.current, speakingRef.current);
-        });
-
-        ws.addEventListener("message", (event) => {
-          if (typeof event.data !== "string") {
-            return;
-          }
-
-          try {
-            const payload = JSON.parse(event.data) as ServerEvent;
-            void handleServerEvent(payload);
-          } catch {
-            setConnectionError("Unexpected realtime payload.");
-          }
-        });
-
-        ws.addEventListener("error", () => {
-          if (isActive) {
-            setConnectionError("Realtime connection failed.");
-          }
-        });
-
-        ws.addEventListener("close", () => {
-          if (!isActive || manualDisconnectRef.current) {
-            return;
-          }
-
-          setConnectionState("disconnected");
-          setConnectionError("Realtime connection lost.");
-        });
+        connectToRealtime();
       } catch (cause) {
         if (!isActive) {
           return;
