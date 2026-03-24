@@ -116,7 +116,7 @@ export const appConfig = {
       },
     },
   },
-  version: "1.3.0",
+  version: "1.3.1",
 } as const satisfies Config;
 
 export function resolveShortcutPlatform(

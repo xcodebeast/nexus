@@ -209,6 +209,39 @@ async function expectNotificationSoundLog(
   await expect.poll(() => getNotificationSoundLog(page)).toEqual(expectedCues);
 }
 
+async function expectMicrophoneCaptureState(
+  page: Page,
+  expected: {
+    requestCount: number;
+    liveTrackCount: number;
+    endedTrackCount: number;
+  },
+) {
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        const microphoneCapture = (
+          window as Window & {
+            __nexusMicrophoneCapture?: {
+              requestCount: number;
+              liveTrackCount: number;
+              endedTrackCount: number;
+            };
+          }
+        ).__nexusMicrophoneCapture;
+
+        return microphoneCapture
+          ? {
+              requestCount: microphoneCapture.requestCount,
+              liveTrackCount: microphoneCapture.liveTrackCount,
+              endedTrackCount: microphoneCapture.endedTrackCount,
+            }
+          : null;
+      });
+    })
+    .toEqual(expected);
+}
+
 async function clickScreenShare(page: Page) {
   await page
     .getByRole("button", { name: /share screen|take over share/i })
@@ -470,6 +503,54 @@ function installNotificationSoundTracker() {
     if (typeof cue === "string") {
       soundLog.push(cue);
     }
+  });
+}
+
+function installMicrophoneCaptureTracker() {
+  let requestCount = 0;
+  const trackedTracks = new Map<string, MediaStreamTrack>();
+  const endedTrackIds = new Set<string>();
+  const originalGetUserMedia =
+    navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+
+  Object.defineProperty(window, "__nexusMicrophoneCapture", {
+    configurable: true,
+    get: () => ({
+      requestCount,
+      liveTrackCount: [...trackedTracks.values()].filter(
+        (track) => track.readyState === "live",
+      ).length,
+      endedTrackCount: endedTrackIds.size,
+    }),
+  });
+
+  Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+    configurable: true,
+    value: async (constraints?: MediaStreamConstraints) => {
+      const stream = await originalGetUserMedia(constraints);
+      if (!constraints?.audio) {
+        return stream;
+      }
+
+      requestCount += 1;
+      for (const track of stream.getAudioTracks()) {
+        trackedTracks.set(track.id, track);
+
+        const nativeStop = track.stop.bind(track);
+        Object.defineProperty(track, "stop", {
+          configurable: true,
+          value: () => {
+            nativeStop();
+            endedTrackIds.add(track.id);
+          },
+        });
+        track.addEventListener("ended", () => {
+          endedTrackIds.add(track.id);
+        });
+      }
+
+      return stream;
+    },
   });
 }
 
@@ -881,6 +962,57 @@ test("shows a clear error when microphone APIs are unavailable", async ({
     page.getByText(/microphone access (requires https or localhost|is unavailable)/i),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: /disconnect/i })).toBeVisible();
+
+  await context.close();
+});
+
+test("mute and AFK release microphone capture until resumed", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser, [
+    installMicrophoneCaptureTracker,
+  ]);
+  const page = await context.newPage();
+
+  await login(page, "Alice");
+  await expectMicrophoneCaptureState(page, {
+    requestCount: 1,
+    liveTrackCount: 1,
+    endedTrackCount: 0,
+  });
+
+  await page.getByRole("button", { name: /mute microphone/i }).click();
+  await expect(
+    page.getByRole("button", { name: /unmute microphone/i }),
+  ).toBeVisible();
+  await expectMicrophoneCaptureState(page, {
+    requestCount: 1,
+    liveTrackCount: 0,
+    endedTrackCount: 1,
+  });
+
+  await page.getByRole("button", { name: /unmute microphone/i }).click();
+  await expectMicrophoneCaptureState(page, {
+    requestCount: 2,
+    liveTrackCount: 1,
+    endedTrackCount: 1,
+  });
+
+  await clickAfk(page);
+  await expect(page.getByText(/AFK: mic and room audio paused\./i)).toBeVisible();
+  await expectMicrophoneCaptureState(page, {
+    requestCount: 2,
+    liveTrackCount: 0,
+    endedTrackCount: 2,
+  });
+
+  await clickAfk(page);
+  await expect(page.getByText(/AFK: mic and room audio paused\./i)).toHaveCount(0);
+  await expectMicrophoneCaptureState(page, {
+    requestCount: 3,
+    liveTrackCount: 1,
+    endedTrackCount: 2,
+  });
 
   await context.close();
 });

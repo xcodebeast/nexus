@@ -67,6 +67,36 @@ function getMicrophoneUnavailableMessage() {
   return "Microphone access is unavailable in this browser.";
 }
 
+function getMicrophoneResumeErrorMessage(cause: unknown) {
+  if (cause instanceof DOMException) {
+    if (
+      cause.name === "NotAllowedError" ||
+      cause.name === "PermissionDeniedError" ||
+      cause.name === "SecurityError"
+    ) {
+      return "Microphone access is required to unmute.";
+    }
+
+    if (
+      cause.name === "NotFoundError" ||
+      cause.name === "DevicesNotFoundError"
+    ) {
+      return "No microphone is available. Connect one and try again.";
+    }
+
+    if (
+      cause.name === "NotReadableError" ||
+      cause.name === "TrackStartError"
+    ) {
+      return "Microphone is unavailable. Close other apps using it and try again.";
+    }
+  }
+
+  return cause instanceof Error
+    ? cause.message
+    : "Microphone access is required to unmute.";
+}
+
 function supportsScreenShare() {
   return Boolean(navigator.mediaDevices?.getDisplayMedia);
 }
@@ -121,6 +151,7 @@ export function useVoiceRoom() {
   const [connectionState, setConnectionState] =
     useState<ConnectionState>(ConnectionState.RequestingMedia);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [localCaptureError, setLocalCaptureError] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [audioProcessingMode, setAudioProcessingMode] =
     useState<AudioProcessingMode>("standard");
@@ -296,19 +327,30 @@ export function useVoiceRoom() {
     });
   }
 
-  function setEffectiveMutedState(nextMuted: boolean) {
-    setIsMuted(nextMuted);
-    setTrackMute(nextMuted);
-  }
-
-  function setTrackMute(nextMuted: boolean) {
-    isMutedRef.current = nextMuted;
+  async function setEffectiveMutedState(nextMuted: boolean) {
     const localAudio = localAudioRef.current;
-    if (!localAudio) {
-      return;
+    if (localAudio) {
+      await localAudio.setMuted(nextMuted);
     }
 
-    localAudio.setMuted(nextMuted);
+    isMutedRef.current = nextMuted;
+    setIsMuted(nextMuted);
+    setLocalCaptureError(null);
+  }
+
+  async function restoreMutedStateAfterResumeFailure(cause: unknown) {
+    setLocalCaptureError(getMicrophoneResumeErrorMessage(cause));
+    manualMutedRef.current = true;
+    speakingRef.current = false;
+
+    try {
+      await localAudioRef.current?.setMuted(true);
+    } catch {
+      // Best effort: keep the browser capture released even if the retry also fails.
+    }
+
+    isMutedRef.current = true;
+    setIsMuted(true);
   }
 
   function syncMediaError() {
@@ -1149,6 +1191,7 @@ export function useVoiceRoom() {
     selfUserIdRef.current = null;
     speakingRef.current = false;
     setMediaError(null);
+    setLocalCaptureError(null);
     setAudioProcessingMode("standard");
     setAudioProcessingReason("unsupported");
     setScreenShareError(null);
@@ -1272,6 +1315,7 @@ export function useVoiceRoom() {
       try {
         setConnectionState(ConnectionState.RequestingMedia);
         setConnectionError(null);
+        setLocalCaptureError(null);
         setMediaError(null);
         setAudioProcessingMode("standard");
         setAudioProcessingReason("unsupported");
@@ -1302,7 +1346,7 @@ export function useVoiceRoom() {
 
         localAudioRef.current = localAudio;
         resumeNotificationAudio();
-        setTrackMute(getEffectiveMuted());
+        await setEffectiveMutedState(getEffectiveMuted());
         startSpeechDetection(localAudio.analyser);
         connectToRealtime();
       } catch (cause) {
@@ -1345,15 +1389,25 @@ export function useVoiceRoom() {
     };
   }, []);
 
-  function toggleMute() {
+  async function toggleMute() {
     if (isAfkRef.current) {
       return;
     }
 
+    const previousManualMuted = manualMutedRef.current;
     const nextManualMuted = !manualMutedRef.current;
     manualMutedRef.current = nextManualMuted;
     const nextMuted = getEffectiveMuted({ manualMuted: nextManualMuted });
-    setEffectiveMutedState(nextMuted);
+
+    try {
+      await setEffectiveMutedState(nextMuted);
+    } catch (cause) {
+      manualMutedRef.current = previousManualMuted;
+      await restoreMutedStateAfterResumeFailure(cause);
+      syncPresence(createPresenceState({ isMuted: true, isSpeaking: false }));
+      return;
+    }
+
     playNotificationCue(nextMuted ? "mute" : "unmute");
 
     if (nextMuted && speakingRef.current) {
@@ -1365,7 +1419,7 @@ export function useVoiceRoom() {
     syncPresence(createPresenceState({ isMuted: nextMuted }));
   }
 
-  function toggleAfk() {
+  async function toggleAfk() {
     const nextAfk = !isAfkRef.current;
     isAfkRef.current = nextAfk;
     setIsAfk(nextAfk);
@@ -1374,7 +1428,11 @@ export function useVoiceRoom() {
     );
 
     const nextMuted = getEffectiveMuted({ isAfk: nextAfk });
-    setEffectiveMutedState(nextMuted);
+    try {
+      await setEffectiveMutedState(nextMuted);
+    } catch (cause) {
+      await restoreMutedStateAfterResumeFailure(cause);
+    }
 
     if (nextAfk) {
       playNotificationCue("afk");
@@ -1399,8 +1457,8 @@ export function useVoiceRoom() {
     syncPresence(
       createPresenceState({
         isAfk: false,
-        isMuted: nextMuted,
-        isSpeaking: nextMuted ? false : speakingRef.current,
+        isMuted: isMutedRef.current,
+        isSpeaking: isMutedRef.current ? false : speakingRef.current,
       }),
     );
     reconnectEligibleAudioPeers();
@@ -1535,7 +1593,7 @@ export function useVoiceRoom() {
     isMuted,
     isAfk,
     connectionState,
-    error: connectionError ?? mediaError,
+    error: connectionError ?? localCaptureError ?? mediaError,
     audioProcessingMode,
     audioProcessingReason,
     activeScreenShareUserId,
