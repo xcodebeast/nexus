@@ -47,6 +47,10 @@ type Config = {
   storage: {
     /** Local storage key used to persist the last authenticated username. */
     usernameKey: string;
+    /** Local storage key used to persist the preferred microphone device. */
+    microphoneDeviceIdKey: string;
+    /** Local storage key used to persist the preferred speaker device. */
+    speakerDeviceIdKey: string;
   };
   /** Configuration for room control shortcuts and their tooltip behavior. */
   roomControls: {
@@ -77,6 +81,8 @@ export const appConfig = {
   },
   storage: {
     usernameKey: "nexus-username",
+    microphoneDeviceIdKey: "nexus-microphone-device-id",
+    speakerDeviceIdKey: "nexus-speaker-device-id",
   },
   roomControls: {
     shortcuts: {
@@ -116,7 +122,7 @@ export const appConfig = {
       },
     },
   },
-  version: "1.3.1",
+  version: "1.4.1",
 } as const satisfies Config;
 
 export function resolveShortcutPlatform(

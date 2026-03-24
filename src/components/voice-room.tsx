@@ -1,4 +1,5 @@
 import { type ComponentProps, type ReactNode, useState } from "react";
+import { AudioDeviceSettingsDialog } from "@/components/audio-device-settings-dialog";
 import { Button } from "@/components/ui/button";
 import { ShortcutKeys } from "@/components/ui/shortcut-keys";
 import {
@@ -27,6 +28,7 @@ import {
   MicOffIcon,
   MonitorIcon,
   PowerIcon,
+  Settings2Icon,
 } from "lucide-react";
 import { ScreenStage } from "./screen-stage";
 import { VoiceAvatar } from "./voice-avatar";
@@ -73,16 +75,31 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
     screenShareStatus,
     screenShareError,
     screenShareNotice,
+    audioDevices,
+    selectedMicrophoneId,
+    selectedSpeakerId,
+    audioDeviceStatus,
+    refreshAudioDevices,
+    selectMicrophone,
+    selectSpeaker,
     toggleMute,
     toggleAfk,
     startScreenShare,
     stopScreenShare,
     disconnect,
   } = useVoiceRoom();
+  const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
 
   const handleDisconnect = async () => {
     disconnect();
     await onDisconnect();
+  };
+
+  const handleAudioSettingsOpenChange = (nextOpen: boolean) => {
+    setIsAudioSettingsOpen(nextOpen);
+    if (nextOpen) {
+      void refreshAudioDevices();
+    }
   };
 
   const muteDisabled =
@@ -215,7 +232,20 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
   ];
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-4 py-8">
+    <div className="relative flex min-h-screen flex-col items-center justify-center px-4 py-8">
+      <div className="fixed right-4 top-4 z-30 sm:right-6 sm:top-6">
+        <Button
+          aria-label="Open audio settings"
+          className="border-primary/40 bg-black/60 text-primary shadow-[0_0_24px_rgba(0,255,65,0.18)] backdrop-blur-sm hover:bg-primary/10"
+          data-testid="audio-settings-trigger"
+          onClick={() => handleAudioSettingsOpenChange(true)}
+          size="icon"
+          variant="outline"
+        >
+          <Settings2Icon />
+        </Button>
+      </div>
+
       <div className="mb-8 text-center animate-in fade-in slide-in-from-top-4 duration-700">
         <h1 className="mb-2 text-2xl font-mono font-bold tracking-wider text-primary sm:text-3xl">
           {appConfig.appName}
@@ -284,6 +314,17 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
       </TooltipProvider>
 
       <Footer />
+
+      <AudioDeviceSettingsDialog
+        audioDeviceStatus={audioDeviceStatus}
+        audioDevices={audioDevices}
+        isOpen={isAudioSettingsOpen}
+        onOpenChange={handleAudioSettingsOpenChange}
+        onSelectMicrophone={selectMicrophone}
+        onSelectSpeaker={selectSpeaker}
+        selectedMicrophoneId={selectedMicrophoneId}
+        selectedSpeakerId={selectedSpeakerId}
+      />
     </div>
   );
 }

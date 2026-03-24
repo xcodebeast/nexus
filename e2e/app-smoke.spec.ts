@@ -258,6 +258,60 @@ async function clickAfk(page: Page) {
     .click();
 }
 
+async function openAudioSettings(page: Page) {
+  await page.getByTestId("audio-settings-trigger").click();
+  await expect(
+    page.getByRole("dialog", { name: /audio settings/i }),
+  ).toBeVisible();
+}
+
+async function expectAudioSettingsSelections(
+  page: Page,
+  expected: { microphoneId: string; speakerId: string },
+) {
+  await expect(page.getByTestId("audio-settings-microphone-select")).toHaveValue(
+    expected.microphoneId,
+  );
+  await expect(page.getByTestId("audio-settings-speaker-select")).toHaveValue(
+    expected.speakerId,
+  );
+}
+
+async function getRequestedMicrophoneDeviceIds(page: Page) {
+  return page.evaluate(() => {
+    const microphoneCapture = (
+      window as Window & {
+        __nexusMicrophoneCapture?: {
+          requestedDeviceIds?: string[];
+        };
+      }
+    ).__nexusMicrophoneCapture;
+
+    return [...(microphoneCapture?.requestedDeviceIds ?? [])];
+  });
+}
+
+async function expectRemoteAudioSinkId(page: Page, expectedSinkId: string) {
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        const audio = document.querySelector("audio[data-peer-id]");
+        if (!(audio instanceof HTMLAudioElement)) {
+          return null;
+        }
+
+        return (
+          (
+            audio as HTMLAudioElement & {
+              sinkId?: string;
+            }
+          ).sinkId ?? ""
+        );
+      });
+    })
+    .toBe(expectedSinkId);
+}
+
 async function getShortcutModifierLabel(page: Page) {
   return page.evaluate(() => {
     const navigatorWithUserAgentData = navigator as Navigator & {
@@ -510,6 +564,7 @@ function installMicrophoneCaptureTracker() {
   let requestCount = 0;
   const trackedTracks = new Map<string, MediaStreamTrack>();
   const endedTrackIds = new Set<string>();
+  const requestedDeviceIds: string[] = [];
   const originalGetUserMedia =
     navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 
@@ -521,18 +576,59 @@ function installMicrophoneCaptureTracker() {
         (track) => track.readyState === "live",
       ).length,
       endedTrackCount: endedTrackIds.size,
+      requestedDeviceIds,
     }),
   });
 
   Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
     configurable: true,
     value: async (constraints?: MediaStreamConstraints) => {
-      const stream = await originalGetUserMedia(constraints);
+      const passthroughConstraints =
+        typeof constraints?.audio === "object"
+          ? {
+              ...constraints,
+              audio: {
+                ...constraints.audio,
+              },
+            }
+          : constraints;
+
       if (!constraints?.audio) {
-        return stream;
+        return originalGetUserMedia(constraints);
       }
 
       requestCount += 1;
+      if (typeof constraints.audio === "object") {
+        const deviceIdConstraint = constraints.audio.deviceId;
+        if (typeof deviceIdConstraint === "string") {
+          requestedDeviceIds.push(deviceIdConstraint);
+        } else if (
+          deviceIdConstraint &&
+          typeof deviceIdConstraint === "object"
+        ) {
+          requestedDeviceIds.push(
+            typeof deviceIdConstraint.exact === "string"
+              ? deviceIdConstraint.exact
+              : typeof deviceIdConstraint.ideal === "string"
+                ? deviceIdConstraint.ideal
+                : "",
+          );
+        } else {
+          requestedDeviceIds.push("");
+        }
+      } else {
+        requestedDeviceIds.push("");
+      }
+
+      if (
+        passthroughConstraints &&
+        typeof passthroughConstraints.audio === "object"
+      ) {
+        delete passthroughConstraints.audio.deviceId;
+      }
+
+      const stream = await originalGetUserMedia(passthroughConstraints);
+
       for (const track of stream.getAudioTracks()) {
         trackedTracks.set(track.id, track);
 
@@ -552,6 +648,120 @@ function installMicrophoneCaptureTracker() {
       return stream;
     },
   });
+}
+
+function installAudioDeviceMocks() {
+  const devices = [
+    {
+      deviceId: "mic-alpha",
+      groupId: "group-mic-alpha",
+      kind: "audioinput",
+      label: "Matrix Mic Alpha",
+      toJSON() {
+        return this;
+      },
+    },
+    {
+      deviceId: "mic-beta",
+      groupId: "group-mic-beta",
+      kind: "audioinput",
+      label: "Matrix Mic Beta",
+      toJSON() {
+        return this;
+      },
+    },
+    {
+      deviceId: "speaker-alpha",
+      groupId: "group-speaker-alpha",
+      kind: "audiooutput",
+      label: "Matrix Speakers Alpha",
+      toJSON() {
+        return this;
+      },
+    },
+    {
+      deviceId: "speaker-beta",
+      groupId: "group-speaker-beta",
+      kind: "audiooutput",
+      label: "Matrix Speakers Beta",
+      toJSON() {
+        return this;
+      },
+    },
+  ] satisfies MediaDeviceInfo[];
+
+  Object.defineProperty(navigator.mediaDevices, "enumerateDevices", {
+    configurable: true,
+    value: async () => devices,
+  });
+
+  (
+    HTMLMediaElement.prototype as HTMLMediaElement & {
+      setSinkId?: (sinkId: string) => Promise<void>;
+    }
+  ).setSinkId = async function (sinkId: string) {
+    Object.defineProperty(this, "sinkId", {
+      configurable: true,
+      writable: true,
+      value: sinkId,
+    });
+  };
+}
+
+function installAudioDeviceMocksWithoutSpeakerSelection() {
+  const devices = [
+    {
+      deviceId: "mic-alpha",
+      groupId: "group-mic-alpha",
+      kind: "audioinput",
+      label: "Matrix Mic Alpha",
+      toJSON() {
+        return this;
+      },
+    },
+    {
+      deviceId: "mic-beta",
+      groupId: "group-mic-beta",
+      kind: "audioinput",
+      label: "Matrix Mic Beta",
+      toJSON() {
+        return this;
+      },
+    },
+    {
+      deviceId: "speaker-alpha",
+      groupId: "group-speaker-alpha",
+      kind: "audiooutput",
+      label: "Matrix Speakers Alpha",
+      toJSON() {
+        return this;
+      },
+    },
+    {
+      deviceId: "speaker-beta",
+      groupId: "group-speaker-beta",
+      kind: "audiooutput",
+      label: "Matrix Speakers Beta",
+      toJSON() {
+        return this;
+      },
+    },
+  ] satisfies MediaDeviceInfo[];
+
+  Object.defineProperty(navigator.mediaDevices, "enumerateDevices", {
+    configurable: true,
+    value: async () => devices,
+  });
+
+  (
+    HTMLMediaElement.prototype as HTMLMediaElement & {
+      setSinkId?: (sinkId: string) => Promise<void>;
+    }
+  ).setSinkId = async function () {
+    throw new Error(
+      "Speaker selection is available in supported Chromium-based browsers.",
+    );
+  };
 }
 
 function installAudioWorkletModuleFailure() {
@@ -964,6 +1174,134 @@ test("shows a clear error when microphone APIs are unavailable", async ({
   await expect(page.getByRole("button", { name: /disconnect/i })).toBeVisible();
 
   await context.close();
+});
+
+test("opens audio settings and restores persisted device selections after reload", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser, [
+    installAudioDeviceMocks,
+    installMicrophoneCaptureTracker,
+  ]);
+  const page = await context.newPage();
+
+  await login(page, "Alice");
+  await openAudioSettings(page);
+
+  await page
+    .getByTestId("audio-settings-microphone-select")
+    .selectOption("mic-beta");
+  await page
+    .getByTestId("audio-settings-speaker-select")
+    .selectOption("speaker-beta");
+  await expectAudioSettingsSelections(page, {
+    microphoneId: "mic-beta",
+    speakerId: "speaker-beta",
+  });
+  await expect.poll(() => getRequestedMicrophoneDeviceIds(page)).toEqual([
+    "",
+    "mic-beta",
+  ]);
+
+  await page.reload();
+  await expect(page.getByTestId("audio-settings-trigger")).toBeVisible();
+  await openAudioSettings(page);
+  await expectAudioSettingsSelections(page, {
+    microphoneId: "mic-beta",
+    speakerId: "speaker-beta",
+  });
+
+  await context.close();
+});
+
+test("routes remote playback to the selected speaker sink when supported", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [installAudioDeviceMocks]);
+  const bobContext = await createVoiceContext(browser, [installAudioDeviceMocks]);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+  await expectRemoteAudioPlaying(alicePage);
+
+  await openAudioSettings(alicePage);
+  await alicePage
+    .getByTestId("audio-settings-speaker-select")
+    .selectOption("speaker-beta");
+  await expectAudioSettingsSelections(alicePage, {
+    microphoneId: "",
+    speakerId: "speaker-beta",
+  });
+  await expectRemoteAudioSinkId(alicePage, "speaker-beta");
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
+test("shows fallback speaker copy when output routing is unsupported", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installAudioDeviceMocksWithoutSpeakerSelection,
+  ]);
+  const bobContext = await createVoiceContext(browser, [installAudioDeviceMocks]);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+  await expectRemoteAudioPlaying(alicePage);
+  await openAudioSettings(alicePage);
+
+  await expect(
+    alicePage.getByTestId("audio-settings-microphone-select"),
+  ).toBeEnabled();
+  await expect(alicePage.getByTestId("audio-settings-speaker-select")).toBeEnabled();
+  await alicePage
+    .getByTestId("audio-settings-speaker-select")
+    .selectOption("speaker-beta");
+  await expect(alicePage.getByTestId("audio-settings-speaker-select")).toHaveValue("");
+  await expect(
+    alicePage.getByText(/speaker selection is available in supported chromium-based browsers\./i),
+  ).toBeVisible();
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
+test("switches microphones without disconnecting the room", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installAudioDeviceMocks,
+    installMicrophoneCaptureTracker,
+  ]);
+  const bobContext = await createVoiceContext(browser, [installAudioDeviceMocks]);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Bob"]);
+  await expectRemoteAudioPlaying(alicePage);
+
+  await openAudioSettings(alicePage);
+  await alicePage
+    .getByTestId("audio-settings-microphone-select")
+    .selectOption("mic-beta");
+
+  await expect.poll(() => getRequestedMicrophoneDeviceIds(alicePage)).toEqual([
+    "",
+    "mic-beta",
+  ]);
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Bob"]);
+  await expect(alicePage.getByText(/realtime connection lost\. reconnecting/i)).toHaveCount(0);
+  await expectRemoteAudioPlaying(alicePage);
+
+  await aliceContext.close();
+  await bobContext.close();
 });
 
 test("mute and AFK release microphone capture until resumed", async ({

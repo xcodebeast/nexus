@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { appConfig } from "@/lib/config";
 import type {
   ClientEvent,
   RoomUser,
@@ -17,6 +18,22 @@ import {
   resumeNotificationAudio,
   type NotificationCue,
 } from "@/lib/audio/notification-sounds";
+
+export interface AudioDeviceOption {
+  id: string;
+  label: string;
+  isDefault: boolean;
+}
+
+interface AudioDeviceCollection {
+  microphones: AudioDeviceOption[];
+  speakers: AudioDeviceOption[];
+}
+
+type AudioOutputElement = HTMLAudioElement & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+  sinkId?: string;
+};
 
 export enum ScreenShareStatus {
   Unsupported = "unsupported",
@@ -111,6 +128,14 @@ const remotePlaybackBlockedMessage = "Remote audio is waiting for a browser inte
 const realtimeReconnectingMessage = "Realtime connection lost. Reconnecting...";
 const sessionUnavailableMessage = "Realtime session expired. Reconnect from the access terminal.";
 const sessionTakenOverMessage = "Realtime session moved to another browser tab or window.";
+const audioDeviceEnumerationUnavailableMessage =
+  "Audio device selection is unavailable in this browser.";
+const speakerSelectionUnsupportedMessage =
+  "Speaker selection is available in supported Chromium-based browsers.";
+const selectedMicrophoneMissingMessage =
+  "Selected microphone disconnected. Switched to the default microphone.";
+const selectedSpeakerMissingMessage =
+  "Selected speaker disconnected. Switched to the system default output.";
 const screenShareUnavailableMessage = "Screen sharing is available in desktop Chromium browsers with display capture support.";
 const screenShareCancelledMessage = "Screen sharing was cancelled before it started.";
 const screenShareFailedMessage = "Screen sharing could not start. Try again.";
@@ -143,8 +168,92 @@ interface PresenceState {
   isAfk: boolean;
 }
 
+function supportsSpeakerSelection() {
+  if (typeof HTMLMediaElement === "undefined") {
+    return false;
+  }
+
+  return (
+    typeof HTMLMediaElement.prototype === "object" &&
+    typeof (HTMLMediaElement.prototype as AudioOutputElement).setSinkId ===
+      "function"
+  );
+}
+
+function readStoredAudioDeviceId(storageKey: string) {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  try {
+    return window.localStorage.getItem(storageKey) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeStoredAudioDeviceId(storageKey: string, deviceId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    if (deviceId) {
+      window.localStorage.setItem(storageKey, deviceId);
+      return;
+    }
+
+    window.localStorage.removeItem(storageKey);
+  } catch {
+    return;
+  }
+}
+
+function isMissingDeviceError(cause: unknown) {
+  return (
+    cause instanceof DOMException &&
+    (cause.name === "NotFoundError" || cause.name === "DevicesNotFoundError")
+  );
+}
+
+function shouldSkipEnumeratedDevice(device: MediaDeviceInfo) {
+  return device.deviceId === "default" || device.deviceId === "communications";
+}
+
+function getFallbackDeviceLabel(
+  kind: "audioinput" | "audiooutput",
+  index: number,
+) {
+  return `${kind === "audioinput" ? "Microphone" : "Speaker"} ${index + 1}`;
+}
+
+function createDefaultAudioOption(kind: "audioinput" | "audiooutput") {
+  return {
+    id: "",
+    label: kind === "audioinput" ? "Default microphone" : "System default",
+    isDefault: true,
+  } satisfies AudioDeviceOption;
+}
+
+function buildAudioDeviceOptions(
+  devices: readonly MediaDeviceInfo[],
+  kind: "audioinput" | "audiooutput",
+) {
+  const defaultOption = createDefaultAudioOption(kind);
+  const matchingDevices = devices
+    .filter((device) => device.kind === kind && !shouldSkipEnumeratedDevice(device))
+    .map((device, index) => ({
+      id: device.deviceId,
+      label: device.label || getFallbackDeviceLabel(kind, index),
+      isDefault: false,
+    }));
+
+  return [defaultOption, ...matchingDevices];
+}
+
 export function useVoiceRoom() {
   const initialScreenShareStatus = getInitialScreenShareStatus();
+  const initialSpeakerSelectionSupported = supportsSpeakerSelection();
   const [users, setUsers] = useState<RoomUser[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [isAfk, setIsAfk] = useState(false);
@@ -169,6 +278,25 @@ export function useVoiceRoom() {
   );
   const [activeScreenStream, setActiveScreenStream] =
     useState<MediaStream | null>(null);
+  const [audioDevices, setAudioDevices] = useState<AudioDeviceCollection>({
+    microphones: [createDefaultAudioOption("audioinput")],
+    speakers: [createDefaultAudioOption("audiooutput")],
+  });
+  const [selectedMicrophoneId, setSelectedMicrophoneId] = useState(() =>
+    readStoredAudioDeviceId(appConfig.storage.microphoneDeviceIdKey),
+  );
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState(() =>
+    initialSpeakerSelectionSupported
+      ? readStoredAudioDeviceId(appConfig.storage.speakerDeviceIdKey)
+      : "",
+  );
+  const [audioDevicesLoading, setAudioDevicesLoading] = useState(true);
+  const [microphoneDeviceError, setMicrophoneDeviceError] = useState<
+    string | null
+  >(null);
+  const [speakerDeviceError, setSpeakerDeviceError] = useState<string | null>(
+    initialSpeakerSelectionSupported ? null : speakerSelectionUnsupportedMessage,
+  );
 
   const wsRef = useRef<WebSocket | null>(null);
   const selfUserIdRef = useRef<string | null>(null);
@@ -202,6 +330,10 @@ export function useVoiceRoom() {
   const screenShareStatusRef =
     useRef<ScreenShareStatus>(initialScreenShareStatus);
   const activeScreenStreamRef = useRef<MediaStream | null>(null);
+  const selectedMicrophoneIdRef = useRef(selectedMicrophoneId);
+  const selectedSpeakerIdRef = useRef(selectedSpeakerId);
+  const microphoneSwapInFlightRef = useRef(false);
+  const speakerSelectionInFlightRef = useRef(false);
 
   function setUsersState(nextUsers: RoomUser[]) {
     usersRef.current = nextUsers;
@@ -224,6 +356,16 @@ export function useVoiceRoom() {
   function setActiveScreenStreamState(stream: MediaStream | null) {
     activeScreenStreamRef.current = stream;
     setActiveScreenStream(stream);
+  }
+
+  function setSelectedMicrophoneIdState(nextDeviceId: string) {
+    selectedMicrophoneIdRef.current = nextDeviceId;
+    setSelectedMicrophoneId(nextDeviceId);
+  }
+
+  function setSelectedSpeakerIdState(nextDeviceId: string) {
+    selectedSpeakerIdRef.current = nextDeviceId;
+    setSelectedSpeakerId(nextDeviceId);
   }
 
   function sendEvent(event: ClientEvent) {
@@ -367,6 +509,227 @@ export function useVoiceRoom() {
     setMediaError(null);
   }
 
+  async function createPreparedLocalAudio(deviceId: string) {
+    return prepareLocalAudio({
+      deviceId: deviceId || undefined,
+      onStateChange: (state) => {
+        setAudioProcessingMode(state.mode);
+        setAudioProcessingReason(state.reason);
+      },
+    });
+  }
+
+  async function replaceOutgoingAudioTracks(stream: MediaStream) {
+    const [nextTrack] = stream.getAudioTracks();
+
+    for (const peer of peerConnectionsRef.current.values()) {
+      const sender = peer
+        .getSenders()
+        .find((candidate) => candidate.track?.kind === "audio");
+
+      if (sender) {
+        await sender.replaceTrack(nextTrack ?? null);
+        continue;
+      }
+
+      if (nextTrack) {
+        peer.addTrack(nextTrack, stream);
+      }
+    }
+  }
+
+  async function applySpeakerSelectionToElement(
+    audio: HTMLAudioElement,
+    deviceId: string,
+  ) {
+    const outputAudio = audio as AudioOutputElement;
+    if (typeof outputAudio.setSinkId !== "function") {
+      return;
+    }
+
+    if ((outputAudio.sinkId ?? "") === deviceId) {
+      return;
+    }
+
+    await outputAudio.setSinkId(deviceId);
+  }
+
+  async function selectSpeaker(
+    nextDeviceId: string,
+    options: { persist?: boolean; successMessage?: string | null } = {},
+  ) {
+    if (!initialSpeakerSelectionSupported) {
+      setSelectedSpeakerIdState("");
+      writeStoredAudioDeviceId(appConfig.storage.speakerDeviceIdKey, "");
+      setSpeakerDeviceError(speakerSelectionUnsupportedMessage);
+      return;
+    }
+
+    if (speakerSelectionInFlightRef.current) {
+      return;
+    }
+
+    const previousDeviceId = selectedSpeakerIdRef.current;
+    speakerSelectionInFlightRef.current = true;
+    setAudioDevicesLoading(true);
+    setSpeakerDeviceError(null);
+
+    try {
+      for (const audio of audioElementsRef.current.values()) {
+        await applySpeakerSelectionToElement(audio, nextDeviceId);
+      }
+
+      setSelectedSpeakerIdState(nextDeviceId);
+      if (options.persist ?? true) {
+        writeStoredAudioDeviceId(
+          appConfig.storage.speakerDeviceIdKey,
+          nextDeviceId,
+        );
+      }
+      setSpeakerDeviceError(options.successMessage ?? null);
+    } catch (cause) {
+      for (const audio of audioElementsRef.current.values()) {
+        try {
+          await applySpeakerSelectionToElement(audio, previousDeviceId);
+        } catch {
+          // Best effort: leave playback on whichever sink the browser accepted.
+        }
+      }
+
+      setSpeakerDeviceError(
+        isMissingDeviceError(cause)
+          ? "Selected speaker is unavailable. Switched back to the previous output."
+          : cause instanceof Error
+            ? cause.message
+            : "Speaker output could not be changed. Try again.",
+      );
+    } finally {
+      speakerSelectionInFlightRef.current = false;
+      setAudioDevicesLoading(false);
+    }
+  }
+
+  async function refreshAudioDevices() {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      setAudioDevices({
+        microphones: [createDefaultAudioOption("audioinput")],
+        speakers: [createDefaultAudioOption("audiooutput")],
+      });
+      setAudioDevicesLoading(false);
+      setMicrophoneDeviceError(audioDeviceEnumerationUnavailableMessage);
+      setSpeakerDeviceError(
+        initialSpeakerSelectionSupported
+          ? audioDeviceEnumerationUnavailableMessage
+          : speakerSelectionUnsupportedMessage,
+      );
+      return;
+    }
+
+    setAudioDevicesLoading(true);
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const nextAudioDevices = {
+        microphones: buildAudioDeviceOptions(devices, "audioinput"),
+        speakers: buildAudioDeviceOptions(devices, "audiooutput"),
+      };
+
+      setAudioDevices(nextAudioDevices);
+      setMicrophoneDeviceError((currentError) =>
+        currentError === audioDeviceEnumerationUnavailableMessage
+          ? null
+          : currentError,
+      );
+      if (initialSpeakerSelectionSupported) {
+        setSpeakerDeviceError((currentError) =>
+          currentError === audioDeviceEnumerationUnavailableMessage
+            ? null
+            : currentError,
+        );
+      }
+
+      if (
+        selectedMicrophoneIdRef.current &&
+        !nextAudioDevices.microphones.some(
+          (device) => device.id === selectedMicrophoneIdRef.current,
+        )
+      ) {
+        await selectMicrophone("", {
+          successMessage: selectedMicrophoneMissingMessage,
+        });
+      }
+
+      if (
+        selectedSpeakerIdRef.current &&
+        !nextAudioDevices.speakers.some(
+          (device) => device.id === selectedSpeakerIdRef.current,
+        )
+      ) {
+        await selectSpeaker("", {
+          successMessage: selectedSpeakerMissingMessage,
+        });
+      }
+    } catch {
+      setAudioDevices({
+        microphones: [createDefaultAudioOption("audioinput")],
+        speakers: [createDefaultAudioOption("audiooutput")],
+      });
+      setMicrophoneDeviceError(audioDeviceEnumerationUnavailableMessage);
+      setSpeakerDeviceError(
+        initialSpeakerSelectionSupported
+          ? audioDeviceEnumerationUnavailableMessage
+          : speakerSelectionUnsupportedMessage,
+      );
+    } finally {
+      setAudioDevicesLoading(false);
+    }
+  }
+
+  async function selectMicrophone(
+    nextDeviceId: string,
+    options: { persist?: boolean; successMessage?: string | null } = {},
+  ) {
+    if (microphoneSwapInFlightRef.current) {
+      return;
+    }
+
+    const previousLocalAudio = localAudioRef.current;
+    const previousDeviceId = selectedMicrophoneIdRef.current;
+    let nextLocalAudio: PreparedLocalAudio | null = null;
+
+    microphoneSwapInFlightRef.current = true;
+    setAudioDevicesLoading(true);
+    setMicrophoneDeviceError(null);
+
+    try {
+      nextLocalAudio = await createPreparedLocalAudio(nextDeviceId);
+      await nextLocalAudio.setMuted(getEffectiveMuted());
+      await replaceOutgoingAudioTracks(nextLocalAudio.outboundStream);
+      stopSpeechDetection();
+      localAudioRef.current = nextLocalAudio;
+      startSpeechDetection(nextLocalAudio.analyser);
+      previousLocalAudio?.destroy();
+      setSelectedMicrophoneIdState(nextDeviceId);
+      if (options.persist ?? true) {
+        writeStoredAudioDeviceId(
+          appConfig.storage.microphoneDeviceIdKey,
+          nextDeviceId,
+        );
+      }
+      setLocalCaptureError(null);
+      setMicrophoneDeviceError(options.successMessage ?? null);
+      await refreshAudioDevices();
+    } catch (cause) {
+      nextLocalAudio?.destroy();
+      localAudioRef.current = previousLocalAudio;
+      setSelectedMicrophoneIdState(previousDeviceId);
+      setMicrophoneDeviceError(getMicrophoneResumeErrorMessage(cause));
+    } finally {
+      microphoneSwapInFlightRef.current = false;
+      setAudioDevicesLoading(false);
+    }
+  }
+
   function clearPeerFailure(peerId: string) {
     if (!failedPeersRef.current.delete(peerId)) {
       return;
@@ -441,6 +804,18 @@ export function useVoiceRoom() {
 
     if (audio.srcObject !== stream) {
       audio.srcObject = stream;
+    }
+
+    if (selectedSpeakerIdRef.current) {
+      void applySpeakerSelectionToElement(audio, selectedSpeakerIdRef.current).catch(
+        (cause) => {
+          setSpeakerDeviceError(
+            cause instanceof Error
+              ? cause.message
+              : "Speaker output could not be changed. Try again.",
+          );
+        },
+      );
     }
 
     clearPeerFailure(peerId);
@@ -1317,27 +1692,41 @@ export function useVoiceRoom() {
         setConnectionError(null);
         setLocalCaptureError(null);
         setMediaError(null);
+        setMicrophoneDeviceError(null);
+        setSpeakerDeviceError(
+          initialSpeakerSelectionSupported
+            ? null
+            : speakerSelectionUnsupportedMessage,
+        );
         setAudioProcessingMode("standard");
         setAudioProcessingReason("unsupported");
         setScreenShareError(null);
         setScreenShareNotice(null);
         setScreenShareStatusState(getInitialScreenShareStatus());
         hasTurnRelayRef.current = false;
+        setAudioDevicesLoading(true);
 
         if (!navigator.mediaDevices?.getUserMedia) {
           throw new Error(getMicrophoneUnavailableMessage());
         }
 
-        const localAudio = await prepareLocalAudio({
-          onStateChange: (state) => {
-            if (!isActive) {
-              return;
-            }
+        const requestedMicrophoneId = selectedMicrophoneIdRef.current;
+        let localAudio: PreparedLocalAudio;
 
-            setAudioProcessingMode(state.mode);
-            setAudioProcessingReason(state.reason);
-          },
-        });
+        try {
+          localAudio = await createPreparedLocalAudio(requestedMicrophoneId);
+        } catch (cause) {
+          if (!requestedMicrophoneId || !isMissingDeviceError(cause)) {
+            throw cause;
+          }
+
+          setSelectedMicrophoneIdState("");
+          writeStoredAudioDeviceId(
+            appConfig.storage.microphoneDeviceIdKey,
+            "",
+          );
+          localAudio = await createPreparedLocalAudio("");
+        }
 
         if (!isActive) {
           localAudio.destroy();
@@ -1348,6 +1737,7 @@ export function useVoiceRoom() {
         resumeNotificationAudio();
         await setEffectiveMutedState(getEffectiveMuted());
         startSpeechDetection(localAudio.analyser);
+        await refreshAudioDevices();
         connectToRealtime();
       } catch (cause) {
         if (!isActive) {
@@ -1360,6 +1750,10 @@ export function useVoiceRoom() {
             ? cause.message
             : "Microphone access is required to join the room.",
         );
+      } finally {
+        if (isActive) {
+          setAudioDevicesLoading(false);
+        }
       }
     }
 
@@ -1369,6 +1763,27 @@ export function useVoiceRoom() {
       isActive = false;
       manualDisconnectRef.current = true;
       teardownRoomConnection();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!initialSpeakerSelectionSupported) {
+      writeStoredAudioDeviceId(appConfig.storage.speakerDeviceIdKey, "");
+    }
+
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices?.addEventListener) {
+      return;
+    }
+
+    const handleDeviceChange = () => {
+      void refreshAudioDevices();
+    };
+
+    mediaDevices.addEventListener("devicechange", handleDeviceChange);
+
+    return () => {
+      mediaDevices.removeEventListener("devicechange", handleDeviceChange);
     };
   }, []);
 
@@ -1601,6 +2016,18 @@ export function useVoiceRoom() {
     screenShareStatus,
     screenShareError,
     screenShareNotice,
+    audioDevices,
+    selectedMicrophoneId,
+    selectedSpeakerId,
+    audioDeviceStatus: {
+      isLoading: audioDevicesLoading,
+      microphoneError: microphoneDeviceError,
+      speakerError: speakerDeviceError,
+      speakerSelectionSupported: initialSpeakerSelectionSupported,
+    },
+    refreshAudioDevices,
+    selectMicrophone,
+    selectSpeaker,
     toggleMute,
     toggleAfk,
     startScreenShare,

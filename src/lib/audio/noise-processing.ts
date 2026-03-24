@@ -23,6 +23,7 @@ export interface PreparedLocalAudio {
 }
 
 interface PrepareLocalAudioOptions {
+  deviceId?: string | null;
   onStateChange?: (state: AudioProcessingState) => void;
 }
 
@@ -50,7 +51,9 @@ function disconnectNode(node: AudioNode | null) {
   }
 }
 
-function buildMicrophoneConstraints(): MediaTrackConstraints {
+function buildMicrophoneConstraints(
+  deviceId?: string | null,
+): MediaTrackConstraints {
   const supportedConstraints = navigator.mediaDevices.getSupportedConstraints();
   const constraints: MediaTrackConstraints = {};
 
@@ -74,13 +77,18 @@ function buildMicrophoneConstraints(): MediaTrackConstraints {
     constraints.sampleRate = { ideal: 48_000 };
   }
 
+  if (deviceId) {
+    constraints.deviceId = { exact: deviceId };
+  }
+
   return constraints;
 }
 
 export async function prepareLocalAudio({
+  deviceId,
   onStateChange,
 }: PrepareLocalAudioOptions = {}): Promise<PreparedLocalAudio> {
-  const microphoneConstraints = buildMicrophoneConstraints();
+  const microphoneConstraints = buildMicrophoneConstraints(deviceId);
   let rawStream: MediaStream | null = await navigator.mediaDevices.getUserMedia({
     audio: microphoneConstraints,
   });
