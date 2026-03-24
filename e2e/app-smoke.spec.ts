@@ -1,5 +1,6 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { appConfig } from "../src/lib/config";
+import type { NotificationCue } from "../src/lib/audio/notification-sounds";
 
 type InitScript = () => void;
 
@@ -173,6 +174,39 @@ async function expectAudioWorkletAttempted(page: Page) {
       });
     })
     .toBeGreaterThan(0);
+}
+
+async function getNotificationSoundLog(page: Page) {
+  return page.evaluate(() => {
+    return [
+      ...(
+        (window as Window & {
+          __nexusNotificationSounds?: NotificationCue[];
+        }).__nexusNotificationSounds ?? []
+      ),
+    ];
+  });
+}
+
+async function clearNotificationSoundLog(page: Page) {
+  await page.evaluate(() => {
+    const soundLog = (
+      window as Window & {
+        __nexusNotificationSounds?: NotificationCue[];
+      }
+    ).__nexusNotificationSounds;
+
+    if (soundLog) {
+      soundLog.length = 0;
+    }
+  });
+}
+
+async function expectNotificationSoundLog(
+  page: Page,
+  expectedCues: NotificationCue[],
+) {
+  await expect.poll(() => getNotificationSoundLog(page)).toEqual(expectedCues);
 }
 
 async function clickScreenShare(page: Page) {
@@ -423,6 +457,22 @@ function installAudioWorkletPassThrough() {
   });
 }
 
+function installNotificationSoundTracker() {
+  const soundLog: string[] = [];
+  Object.defineProperty(window, "__nexusNotificationSounds", {
+    configurable: true,
+    writable: true,
+    value: soundLog,
+  });
+
+  window.addEventListener("nexus:notification-sound", (event) => {
+    const cue = (event as CustomEvent<{ cue?: string }>).detail?.cue;
+    if (typeof cue === "string") {
+      soundLog.push(cue);
+    }
+  });
+}
+
 function installAudioWorkletModuleFailure() {
   const audioWorkletState = {
     addModuleCallCount: 0,
@@ -609,6 +659,38 @@ test("authenticates and synchronizes room presence across three clients", async 
   await aliceContext.close();
   await bobContext.close();
   await carolContext.close();
+});
+
+test("notification sounds cover join and leave for local and remote clients", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installNotificationSoundTracker,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installNotificationSoundTracker,
+  ]);
+
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await expectRoomPresence(alicePage, 1, ["Alice (YOU)"]);
+  await expectNotificationSoundLog(alicePage, ["join"]);
+
+  await login(bobPage, "Bob");
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Bob"]);
+  await expectRoomPresence(bobPage, 2, ["Bob (YOU)", "Alice"]);
+  await expectNotificationSoundLog(alicePage, ["join", "join"]);
+  await expectNotificationSoundLog(bobPage, ["join"]);
+
+  await bobPage.getByRole("button", { name: /disconnect/i }).click();
+  await expectRoomPresence(alicePage, 1, ["Alice (YOU)"]);
+  await expectNotificationSoundLog(alicePage, ["join", "join", "leave"]);
+  await expectNotificationSoundLog(bobPage, ["join", "leave"]);
+
+  await aliceContext.close();
+  await bobContext.close();
 });
 
 test("reconnects a dropped realtime client back into a three-user room", async ({
@@ -941,6 +1023,72 @@ test("shortcuts drive mute, AFK, and disconnect room controls", async ({
   await context.close();
 });
 
+test("notification sounds stay local for mute and unmute", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installNotificationSoundTracker,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installNotificationSoundTracker,
+  ]);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Bob"]);
+  await expectRoomPresence(bobPage, 2, ["Bob (YOU)", "Alice"]);
+  await expectNotificationSoundLog(alicePage, ["join", "join"]);
+  await expectNotificationSoundLog(bobPage, ["join"]);
+  await clearNotificationSoundLog(alicePage);
+  await clearNotificationSoundLog(bobPage);
+
+  await alicePage.getByRole("button", { name: /mute microphone/i }).click();
+  await expectNotificationSoundLog(alicePage, ["mute"]);
+  await expectNotificationSoundLog(bobPage, []);
+
+  await alicePage.getByRole("button", { name: /unmute microphone/i }).click();
+  await expectNotificationSoundLog(alicePage, ["mute", "unmute"]);
+  await expectNotificationSoundLog(bobPage, []);
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
+test("notification sounds cover AFK for local and remote clients", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installNotificationSoundTracker,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installNotificationSoundTracker,
+  ]);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Bob"]);
+  await expectRoomPresence(bobPage, 2, ["Bob (YOU)", "Alice"]);
+  await expectNotificationSoundLog(alicePage, ["join", "join"]);
+  await expectNotificationSoundLog(bobPage, ["join"]);
+  await clearNotificationSoundLog(alicePage);
+  await clearNotificationSoundLog(bobPage);
+
+  await clickAfk(alicePage);
+  await expectNotificationSoundLog(alicePage, ["afk"]);
+  await expectNotificationSoundLog(bobPage, ["afk"]);
+
+  await clickAfk(alicePage);
+  await expectNotificationSoundLog(alicePage, ["afk"]);
+  await expectNotificationSoundLog(bobPage, ["afk"]);
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
 test("AFK stops active screen sharing and blocks restarting until return", async ({
   browser,
 }) => {
@@ -1162,6 +1310,77 @@ test("stops the active screen share from the room controls", async ({ browser })
 
   await aliceContext.close();
   await bobContext.close();
+});
+
+test("notification sounds cover screen share start, stop, takeover, and late joins", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installScreenShareMocks,
+    installNotificationSoundTracker,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installScreenShareMocks,
+    installNotificationSoundTracker,
+  ]);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Bob"]);
+  await expectRoomPresence(bobPage, 2, ["Bob (YOU)", "Alice"]);
+  await expectNotificationSoundLog(alicePage, ["join", "join"]);
+  await expectNotificationSoundLog(bobPage, ["join"]);
+  await clearNotificationSoundLog(alicePage);
+  await clearNotificationSoundLog(bobPage);
+
+  await clickScreenShare(alicePage);
+  await expectNotificationSoundLog(alicePage, ["screen-share-start"]);
+  await expectNotificationSoundLog(bobPage, ["screen-share-start"]);
+
+  await clickStopScreenShare(alicePage);
+  await expectNotificationSoundLog(alicePage, [
+    "screen-share-start",
+    "screen-share-stop",
+  ]);
+  await expectNotificationSoundLog(bobPage, [
+    "screen-share-start",
+    "screen-share-stop",
+  ]);
+
+  await clearNotificationSoundLog(alicePage);
+  await clearNotificationSoundLog(bobPage);
+
+  await clickScreenShare(alicePage);
+  await expectNotificationSoundLog(alicePage, ["screen-share-start"]);
+  await expectNotificationSoundLog(bobPage, ["screen-share-start"]);
+
+  await clickScreenShare(bobPage);
+  await expectScreenStageVideo(alicePage, "Bob");
+  await expectScreenStageVideo(bobPage, "Bob");
+  await expectNotificationSoundLog(alicePage, [
+    "screen-share-start",
+    "screen-share-stop",
+  ]);
+  await expectNotificationSoundLog(bobPage, [
+    "screen-share-start",
+    "screen-share-stop",
+  ]);
+
+  const carolContext = await createVoiceContext(browser, [
+    installScreenShareMocks,
+    installNotificationSoundTracker,
+  ]);
+  const carolPage = await carolContext.newPage();
+
+  await login(carolPage, "Carol");
+  await expectScreenStageVideo(carolPage, "Bob");
+  await expectNotificationSoundLog(carolPage, ["join"]);
+
+  await aliceContext.close();
+  await bobContext.close();
+  await carolContext.close();
 });
 
 test("shortcut starts and stops screen sharing", async ({ browser }) => {

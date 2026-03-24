@@ -12,6 +12,11 @@ import {
   type AudioProcessingReason,
   type PreparedLocalAudio,
 } from "@/lib/audio/noise-processing";
+import {
+  playNotificationCue,
+  resumeNotificationAudio,
+  type NotificationCue,
+} from "@/lib/audio/notification-sounds";
 
 export enum ScreenShareStatus {
   Unsupported = "unsupported",
@@ -82,6 +87,25 @@ const screenShareFailedMessage = "Screen sharing could not start. Try again.";
 const screenShareConnectionFailedMessage = "Screen share connection failed. Ask the presenter to restart sharing.";
 const screenShareNotReadyMessage = "Realtime connection is not ready for screen sharing yet.";
 const screenShareAfkMessage = "Return from AFK to share your screen.";
+
+function getScreenShareNotificationCue(
+  previousUserId: string | null,
+  nextUserId: string | null,
+): NotificationCue | null {
+  if (previousUserId === nextUserId) {
+    return null;
+  }
+
+  if (!previousUserId && nextUserId) {
+    return "screen-share-start";
+  }
+
+  if (previousUserId) {
+    return "screen-share-stop";
+  }
+
+  return null;
+}
 
 interface PresenceState {
   isMuted: boolean;
@@ -857,12 +881,23 @@ export function useVoiceRoom() {
     pendingScreenIceCandidatesRef.current.set(fromUserId, pendingCandidates);
   }
 
-  function applyActiveScreenShareUpdate(nextUserId: string | null) {
+  function applyActiveScreenShareUpdate(
+    nextUserId: string | null,
+    options: { emitSound?: boolean } = {},
+  ) {
+    const emitSound = options.emitSound ?? true;
     const previousUserId = activeScreenShareUserIdRef.current;
+    const screenShareNotificationCue = emitSound
+      ? getScreenShareNotificationCue(previousUserId, nextUserId)
+      : null;
     activeScreenShareUserIdRef.current = nextUserId;
     setActiveScreenShareUserId(nextUserId);
 
     const selfUserId = selfUserIdRef.current;
+    if (screenShareNotificationCue) {
+      playNotificationCue(screenShareNotificationCue);
+    }
+
     if (previousUserId === nextUserId) {
       if (nextUserId === selfUserId && localScreenStreamRef.current) {
         setActiveScreenStreamState(localScreenStreamRef.current);
@@ -936,7 +971,9 @@ export function useVoiceRoom() {
           ),
         ),
       );
-      applyActiveScreenShareUpdate(event.activeScreenShareUserId);
+      applyActiveScreenShareUpdate(event.activeScreenShareUserId, {
+        emitSound: false,
+      });
 
       for (const user of event.users) {
         if (user.id !== event.selfUserId && !user.isAfk) {
@@ -949,6 +986,7 @@ export function useVoiceRoom() {
 
     if (event.type === "room:user-joined") {
       updateUser(event.user);
+      playNotificationCue("join");
       if (event.user.id !== selfUserIdRef.current) {
         void createAudioOfferForPeer(event.user.id);
         if (selfUserIdRef.current === activeScreenShareUserIdRef.current) {
@@ -961,6 +999,11 @@ export function useVoiceRoom() {
     if (event.type === "room:user-updated") {
       const previousUser = getUser(event.user.id);
       updateUser(event.user);
+
+      if (previousUser && !previousUser.isAfk && event.user.isAfk) {
+        playNotificationCue("afk");
+      }
+
       if (event.user.id === selfUserIdRef.current) {
         if (previousUser?.isAfk && !event.user.isAfk) {
           reconnectEligibleAudioPeers();
@@ -994,6 +1037,7 @@ export function useVoiceRoom() {
       if (event.userId === activeScreenShareUserIdRef.current) {
         applyActiveScreenShareUpdate(null);
       }
+      playNotificationCue("leave");
       return;
     }
 
@@ -1257,6 +1301,7 @@ export function useVoiceRoom() {
         }
 
         localAudioRef.current = localAudio;
+        resumeNotificationAudio();
         setTrackMute(getEffectiveMuted());
         startSpeechDetection(localAudio.analyser);
         connectToRealtime();
@@ -1285,6 +1330,7 @@ export function useVoiceRoom() {
 
   useEffect(() => {
     const handleUserInteraction = () => {
+      resumeNotificationAudio();
       queueMicrotask(() => {
         retryBlockedAudioPlayback();
       });
@@ -1308,6 +1354,7 @@ export function useVoiceRoom() {
     manualMutedRef.current = nextManualMuted;
     const nextMuted = getEffectiveMuted({ manualMuted: nextManualMuted });
     setEffectiveMutedState(nextMuted);
+    playNotificationCue(nextMuted ? "mute" : "unmute");
 
     if (nextMuted && speakingRef.current) {
       speakingRef.current = false;
@@ -1328,6 +1375,10 @@ export function useVoiceRoom() {
 
     const nextMuted = getEffectiveMuted({ isAfk: nextAfk });
     setEffectiveMutedState(nextMuted);
+
+    if (nextAfk) {
+      playNotificationCue("afk");
+    }
 
     if (nextAfk) {
       speakingRef.current = false;
@@ -1471,6 +1522,7 @@ export function useVoiceRoom() {
   }
 
   function disconnect() {
+    playNotificationCue("leave");
     manualDisconnectRef.current = true;
     teardownRoomConnection();
     setUsersState([]);
