@@ -30,7 +30,7 @@ Run the container:
 
 ```bash
 docker run --rm -p 3000:3000 \
-  -e NEXUS_PASSWORD=potato \
+  -e NEXUS_PASSWORD=yourpassword \
   nexus
 ```
 

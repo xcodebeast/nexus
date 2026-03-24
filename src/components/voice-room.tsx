@@ -1,10 +1,24 @@
+import { type ComponentProps, type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ShortcutKeys } from "@/components/ui/shortcut-keys";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { useRoomActionShortcuts } from "@/hooks/use-room-action-shortcuts";
 import {
   ConnectionState,
   ScreenShareStatus,
   useVoiceRoom,
 } from "@/hooks/use-voice-room";
-import { appConfig } from "@/lib/config";
+import {
+  appConfig,
+  getShortcutDisplayKeys,
+  type RoomShortcutActionId,
+} from "@/lib/config";
+import { cn } from "@/lib/utils";
 import {
   GithubIcon,
   HeadphoneOffIcon,
@@ -32,6 +46,19 @@ interface VoiceRoomProps {
   currentUser: string;
   onDisconnect: () => Promise<void> | void;
 }
+
+type RoomControlButtonProps = {
+  actionId: RoomShortcutActionId;
+  ariaKeyshortcuts: string;
+  className: string;
+  disabled: boolean;
+  icon: ReactNode;
+  isShortcutRevealActive: boolean;
+  label: string;
+  onPress: () => Promise<void> | void;
+  shortcutKeys: readonly string[];
+  variant: ComponentProps<typeof Button>["variant"];
+};
 
 export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
   const {
@@ -81,6 +108,13 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
     screenShareStatus === ScreenShareStatus.Unsupported
       ? "Screen sharing is available in desktop Chromium browsers."
       : null;
+  const muteButtonLabel = isMuted ? "Unmute microphone" : "Mute microphone";
+  const afkButtonLabel = isAfk ? "Return from AFK" : "Go AFK";
+  const screenShareButtonLabel = isSelfPresenting
+    ? "Stop sharing"
+    : activeScreenShareUserId
+      ? "Take over share"
+      : "Share screen";
   const handleScreenShareAction = async () => {
     if (isSelfPresenting) {
       stopScreenShare();
@@ -89,6 +123,96 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
 
     await startScreenShare();
   };
+  const { isShortcutRevealActive, shortcutPlatform } = useRoomActionShortcuts({
+    actions: {
+      mute: {
+        disabled: muteDisabled,
+        onTrigger: toggleMute,
+      },
+      afk: {
+        disabled: afkDisabled,
+        onTrigger: toggleAfk,
+      },
+      screenShare: {
+        disabled: screenShareDisabled,
+        onTrigger: handleScreenShareAction,
+      },
+      disconnect: {
+        disabled: false,
+        onTrigger: handleDisconnect,
+      },
+    },
+  });
+  const roomControlButtons: RoomControlButtonProps[] = [
+    {
+      actionId: "mute",
+      ariaKeyshortcuts:
+        appConfig.roomControls.shortcuts.bindings.mute.ariaKeyshortcuts,
+      className: cn(
+        "border-primary/50 px-6 font-mono uppercase tracking-wider transition-all duration-300",
+        isMuted
+          ? "border-destructive bg-destructive/20 text-destructive hover:bg-destructive/30"
+          : "text-primary hover:border-primary hover:bg-primary/10",
+      ),
+      disabled: muteDisabled,
+      icon: isMuted ? <MicOffIcon /> : <MicIcon />,
+      isShortcutRevealActive,
+      label: muteButtonLabel,
+      onPress: toggleMute,
+      shortcutKeys: getShortcutDisplayKeys("mute", shortcutPlatform),
+      variant: isMuted ? "destructive" : "outline",
+    },
+    {
+      actionId: "afk",
+      ariaKeyshortcuts:
+        appConfig.roomControls.shortcuts.bindings.afk.ariaKeyshortcuts,
+      className: cn(
+        "border-primary/50 px-6 font-mono uppercase tracking-wider transition-all duration-300",
+        isAfk
+          ? "border-amber-400 bg-amber-500/15 text-amber-300 hover:bg-amber-500/20"
+          : "text-primary hover:border-primary hover:bg-primary/10",
+      ),
+      disabled: afkDisabled,
+      icon: isAfk ? <HeadphoneOffIcon /> : <HeadphonesIcon />,
+      isShortcutRevealActive,
+      label: afkButtonLabel,
+      onPress: toggleAfk,
+      shortcutKeys: getShortcutDisplayKeys("afk", shortcutPlatform),
+      variant: isAfk ? "destructive" : "outline",
+    },
+    {
+      actionId: "screenShare",
+      ariaKeyshortcuts:
+        appConfig.roomControls.shortcuts.bindings.screenShare.ariaKeyshortcuts,
+      className: cn(
+        "border-primary/50 px-6 font-mono uppercase tracking-wider transition-all duration-300",
+        isSelfPresenting
+          ? "border-destructive bg-destructive/20 text-destructive hover:bg-destructive/30"
+          : "text-primary hover:border-primary hover:bg-primary/10",
+      ),
+      disabled: screenShareDisabled,
+      icon: <MonitorIcon />,
+      isShortcutRevealActive,
+      label: screenShareButtonLabel,
+      onPress: handleScreenShareAction,
+      shortcutKeys: getShortcutDisplayKeys("screenShare", shortcutPlatform),
+      variant: isSelfPresenting ? "destructive" : "outline",
+    },
+    {
+      actionId: "disconnect",
+      ariaKeyshortcuts:
+        appConfig.roomControls.shortcuts.bindings.disconnect.ariaKeyshortcuts,
+      className:
+        "border-destructive/50 px-6 font-mono uppercase tracking-wider text-destructive transition-all duration-300 hover:border-destructive hover:bg-destructive/10",
+      disabled: false,
+      icon: <PowerIcon />,
+      isShortcutRevealActive,
+      label: "Disconnect",
+      onPress: handleDisconnect,
+      shortcutKeys: getShortcutDisplayKeys("disconnect", shortcutPlatform),
+      variant: "outline",
+    },
+  ];
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center px-4 py-8">
@@ -149,150 +273,77 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
         ))}
       </div>
 
-      <div className="flex flex-wrap justify-center gap-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300">
-        <ToggleMuteButton
-          onToggleMute={toggleMute}
-          disabled={muteDisabled}
-          isMuted={isMuted}
-        />
-        <ToggleAfkButton
-          onToggleAfk={toggleAfk}
-          disabled={afkDisabled}
-          isAfk={isAfk}
-        />
-        <ShareScreenButton
-          onShareScreen={handleScreenShareAction}
-          disabled={screenShareDisabled}
-          isSelfPresenting={isSelfPresenting}
-          activeScreenShareUserId={activeScreenShareUserId}
-        />
-        <DisconnectButton onDisconnect={handleDisconnect} />
-      </div>
+      <TooltipProvider
+        delayDuration={appConfig.roomControls.shortcuts.tooltip.hoverDelayMs}
+      >
+        <div className="flex flex-wrap justify-center gap-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300">
+          {roomControlButtons.map((button) => (
+            <RoomControlButton key={button.actionId} {...button} />
+          ))}
+        </div>
+      </TooltipProvider>
 
       <Footer />
     </div>
   );
 }
 
-type ToggleMuteButtonProps = {
-  onToggleMute: () => void;
-  disabled: boolean;
-  isMuted: boolean;
-};
-
-const ToggleMuteButton = ({
-  onToggleMute,
+const RoomControlButton = ({
+  actionId,
+  ariaKeyshortcuts,
+  className,
   disabled,
-  isMuted,
-}: ToggleMuteButtonProps) => {
-  const muteButtonLabel = isMuted ? "Unmute microphone" : "Mute microphone";
-
-  return (
+  icon,
+  isShortcutRevealActive,
+  label,
+  onPress,
+  shortcutKeys,
+  variant,
+}: RoomControlButtonProps) => {
+  const [isHoverTooltipOpen, setIsHoverTooltipOpen] = useState(false);
+  const isTooltipOpen = isShortcutRevealActive || isHoverTooltipOpen;
+  const showTooltipLabel = isHoverTooltipOpen;
+  const renderedShortcutKeys = showTooltipLabel
+    ? shortcutKeys
+    : shortcutKeys.slice(-1);
+  const button = (
     <Button
-      onClick={onToggleMute}
-      aria-label={muteButtonLabel}
+      onClick={() => void onPress()}
+      aria-label={label}
+      aria-keyshortcuts={ariaKeyshortcuts}
+      data-testid={`room-control-${actionId}`}
       disabled={disabled}
-      variant={isMuted ? "destructive" : "outline"}
-      className={`
-        px-6 font-mono uppercase tracking-wider transition-all duration-300
-        ${
-          isMuted
-            ? "border-destructive bg-destructive/20 text-destructive hover:bg-destructive/30"
-            : "border-primary/50 text-primary hover:border-primary hover:bg-primary/10"
-        }
-      `}
+      variant={variant}
+      className={cn("relative", className)}
     >
-      {isMuted ? <MicOffIcon /> : <MicIcon />}
+      {icon}
     </Button>
   );
-};
-
-type ToggleAfkButtonProps = {
-  onToggleAfk: () => void;
-  disabled: boolean;
-  isAfk: boolean;
-};
-
-const ToggleAfkButton = ({
-  onToggleAfk,
-  disabled,
-  isAfk,
-}: ToggleAfkButtonProps) => {
-  const afkButtonLabel = isAfk ? "Return from AFK" : "Go AFK";
 
   return (
-    <Button
-      onClick={onToggleAfk}
-      aria-label={afkButtonLabel}
-      disabled={disabled}
-      variant={isAfk ? "destructive" : "outline"}
-      className={`
-        px-6 font-mono uppercase tracking-wider transition-all duration-300
-        ${
-          isAfk
-            ? "border-amber-400 bg-amber-500/15 text-amber-300 hover:bg-amber-500/20"
-            : "border-primary/50 text-primary hover:border-primary hover:bg-primary/10"
-        }
-      `}
-    >
-      {isAfk ? <HeadphoneOffIcon /> : <HeadphonesIcon />}
-    </Button>
+    <Tooltip open={isTooltipOpen} onOpenChange={setIsHoverTooltipOpen}>
+      <TooltipTrigger asChild>
+        {disabled ? <span className="inline-flex">{button}</span> : button}
+      </TooltipTrigger>
+      <TooltipContent
+        data-testid={`room-control-tooltip-${actionId}`}
+        className={cn(
+          "flex items-center font-mono",
+          showTooltipLabel ? "gap-1.5" : "justify-center",
+        )}
+        side="top"
+      >
+        {showTooltipLabel ? (
+          <span className="text-[11px] leading-none">{label}</span>
+        ) : null}
+        <ShortcutKeys
+          keys={renderedShortcutKeys}
+          keyClassName="min-w-5 px-1.5 py-0.5 text-[8px]"
+        />
+      </TooltipContent>
+    </Tooltip>
   );
 };
-
-type ShareScreenButtonProps = {
-  onShareScreen: () => Promise<void> | void;
-  disabled: boolean;
-  isSelfPresenting: boolean;
-  activeScreenShareUserId: string | null;
-};
-
-const ShareScreenButton = ({
-  onShareScreen,
-  disabled,
-  isSelfPresenting,
-  activeScreenShareUserId,
-}: ShareScreenButtonProps) => {
-  const screenShareButtonLabel = isSelfPresenting
-    ? "Stop Sharing"
-    : activeScreenShareUserId
-      ? "Take Over Share"
-      : "Share Screen";
-
-  return (
-    <Button
-      onClick={() => void onShareScreen()}
-      aria-label={screenShareButtonLabel}
-      disabled={disabled}
-      variant={isSelfPresenting ? "destructive" : "outline"}
-      className={`
-        px-6 font-mono uppercase tracking-wider transition-all duration-300
-        ${
-          isSelfPresenting
-            ? "border-destructive bg-destructive/20 text-destructive hover:bg-destructive/30"
-            : "border-primary/50 text-primary hover:border-primary hover:bg-primary/10"
-        }
-      `}
-    >
-      <MonitorIcon />
-    </Button>
-  );
-};
-
-type DisconnectButtonProps = {
-  onDisconnect: () => Promise<void> | void;
-};
-
-const DisconnectButton = ({ onDisconnect }: DisconnectButtonProps) => (
-  <Button
-    onClick={() => void onDisconnect()}
-    aria-label="Disconnect"
-    variant="outline"
-    className="border-destructive/50 px-6 font-mono uppercase tracking-wider text-destructive transition-all duration-300 hover:border-destructive hover:bg-destructive/10"
-  >
-    <PowerIcon />
-  </Button>
-);
 
 const Footer = () => (
   <div className="absolute bottom-4 text-center animate-in fade-in duration-1000 delay-500">

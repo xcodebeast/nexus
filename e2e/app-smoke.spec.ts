@@ -191,6 +191,53 @@ async function clickAfk(page: Page) {
     .click();
 }
 
+async function getShortcutModifierLabel(page: Page) {
+  return page.evaluate(() => {
+    const navigatorWithUserAgentData = navigator as Navigator & {
+      userAgentData?: {
+        platform?: string;
+      };
+    };
+    const platform =
+      navigatorWithUserAgentData.userAgentData?.platform ??
+      navigator.platform ??
+      navigator.userAgent;
+
+    return /mac/i.test(platform) ? "Control" : "Ctrl";
+  });
+}
+
+async function holdShortcutRevealModifier(page: Page) {
+  await page.keyboard.down("Control");
+}
+
+async function releaseShortcutRevealModifier(page: Page) {
+  await page.keyboard.up("Control");
+}
+
+async function triggerRoomShortcut(
+  page: Page,
+  key: "KeyM" | "KeyF" | "KeyS" | "KeyD",
+) {
+  await holdShortcutRevealModifier(page);
+  await page.keyboard.press(key);
+  await releaseShortcutRevealModifier(page);
+}
+
+async function expectRoomControlTooltipVisible(
+  page: Page,
+  actionId: "mute" | "afk" | "screenShare" | "disconnect",
+) {
+  await expect(page.getByTestId(`room-control-tooltip-${actionId}`)).toBeVisible();
+}
+
+async function expectRoomControlTooltipHidden(
+  page: Page,
+  actionId: "mute" | "afk" | "screenShare" | "disconnect",
+) {
+  await expect(page.getByTestId(`room-control-tooltip-${actionId}`)).toHaveCount(0);
+}
+
 async function expectScreenStageVideo(page: Page, presenterName: string) {
   await expect(
     page.getByText(new RegExp(`Screen Share: ${presenterName}`, "i")),
@@ -804,6 +851,96 @@ test("AFK keeps room presence while disconnecting audio until return", async ({
   await bobContext.close();
 });
 
+test("shortcut hints and tooltips are discoverable on room controls", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser);
+  const page = await context.newPage();
+
+  await login(page, "Alice");
+  const modifierLabel = await getShortcutModifierLabel(page);
+  const hoverDelayMs = appConfig.roomControls.shortcuts.tooltip.hoverDelayMs;
+  const revealDelayMs = appConfig.roomControls.shortcuts.tooltip.revealDelayMs;
+
+  await expectRoomControlTooltipHidden(page, "mute");
+  await expectRoomControlTooltipHidden(page, "afk");
+  await expectRoomControlTooltipHidden(page, "screenShare");
+  await expectRoomControlTooltipHidden(page, "disconnect");
+
+  await holdShortcutRevealModifier(page);
+  await page.waitForTimeout(Math.max(0, revealDelayMs - 40));
+  await expectRoomControlTooltipHidden(page, "mute");
+  await page.waitForTimeout(60);
+  await expectRoomControlTooltipVisible(page, "mute");
+  await expectRoomControlTooltipVisible(page, "afk");
+  await expectRoomControlTooltipVisible(page, "screenShare");
+  await expectRoomControlTooltipVisible(page, "disconnect");
+  const shortcutRevealTooltip = page.getByTestId("room-control-tooltip-mute");
+  await expect(shortcutRevealTooltip).toContainText("M");
+  await expect(shortcutRevealTooltip).not.toContainText(modifierLabel);
+  await expect(shortcutRevealTooltip).not.toContainText(/mute microphone/i);
+  await releaseShortcutRevealModifier(page);
+
+  await expectRoomControlTooltipHidden(page, "mute");
+  await expectRoomControlTooltipHidden(page, "afk");
+  await expectRoomControlTooltipHidden(page, "screenShare");
+  await expectRoomControlTooltipHidden(page, "disconnect");
+
+  await page.getByTestId("room-control-mute").hover();
+  await page.waitForTimeout(Math.max(0, hoverDelayMs - 40));
+  await expectRoomControlTooltipHidden(page, "mute");
+  await page.waitForTimeout(60);
+  const hoverTooltip = page.getByTestId("room-control-tooltip-mute");
+  await expect(hoverTooltip).toContainText(/mute microphone/i);
+  await expect(hoverTooltip).toContainText(modifierLabel);
+  await expect(hoverTooltip).toContainText("M");
+
+  await context.close();
+});
+
+test("shortcuts drive mute, AFK, and disconnect room controls", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser);
+  const page = await context.newPage();
+
+  await login(page, "Alice");
+
+  await triggerRoomShortcut(page, "KeyM");
+  await expect(
+    page.getByRole("button", { name: /unmute microphone/i }),
+  ).toBeVisible();
+
+  await triggerRoomShortcut(page, "KeyM");
+  await expect(
+    page.getByRole("button", { name: /mute microphone/i }),
+  ).toBeVisible();
+
+  await triggerRoomShortcut(page, "KeyF");
+  await expect(page.getByText(/AFK: mic and room audio paused\./i)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /unmute microphone/i }),
+  ).toBeDisabled();
+
+  await triggerRoomShortcut(page, "KeyM");
+  await expect(
+    page.getByRole("button", { name: /unmute microphone/i }),
+  ).toBeDisabled();
+  await expect(page.getByText(/AFK: mic and room audio paused\./i)).toBeVisible();
+
+  await triggerRoomShortcut(page, "KeyF");
+  await expect(page.getByText(/AFK: mic and room audio paused\./i)).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /mute microphone/i }),
+  ).toBeEnabled();
+
+  await triggerRoomShortcut(page, "KeyD");
+  await expect(page.getByRole("button", { name: /connect/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /disconnect/i })).toHaveCount(0);
+
+  await context.close();
+});
+
 test("AFK stops active screen sharing and blocks restarting until return", async ({
   browser,
 }) => {
@@ -1025,4 +1162,19 @@ test("stops the active screen share from the room controls", async ({ browser })
 
   await aliceContext.close();
   await bobContext.close();
+});
+
+test("shortcut starts and stops screen sharing", async ({ browser }) => {
+  const context = await createVoiceContext(browser, [installScreenShareMocks]);
+  const page = await context.newPage();
+
+  await login(page, "Alice");
+
+  await triggerRoomShortcut(page, "KeyS");
+  await expectScreenStageVideo(page, "Alice");
+
+  await triggerRoomShortcut(page, "KeyS");
+  await expectScreenShareIdle(page);
+
+  await context.close();
 });
