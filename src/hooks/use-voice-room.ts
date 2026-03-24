@@ -13,29 +13,29 @@ import {
   type PreparedLocalAudio,
 } from "@/lib/audio/noise-processing";
 
-type ConnectionState =
-  | "requesting-media"
-  | "connecting"
-  | "reconnecting"
-  | "connected"
-  | "disconnected";
+export enum ScreenShareStatus {
+  Unsupported = "unsupported",
+  Idle = "idle",
+  Requesting = "requesting",
+  Starting = "starting",
+  Sharing = "sharing",
+  Stopping = "stopping",
+}
 
-type ScreenShareStatus =
-  | "unsupported"
-  | "idle"
-  | "requesting"
-  | "starting"
-  | "sharing"
-  | "stopping";
+export enum ConnectionState {
+  RequestingMedia = "requesting-media",
+  Connecting = "connecting",
+  Reconnecting = "reconnecting",
+  Disconnected = "disconnected",
+  Connected = "connected",
+}
 
 function buildWebSocketUrl(pathname: string) {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}${pathname}`;
 }
 
-function sortUsers(users: RoomUser[]) {
-  return [...users].sort((left, right) => left.connectedAt - right.connectedAt);
-}
+const sortUsers = (users: RoomUser[]) => [...users].sort((left, right) => left.connectedAt - right.connectedAt);
 
 function hasTurnRelay(rtcConfiguration: RTCConfiguration) {
   return (rtcConfiguration.iceServers ?? []).some((server) => {
@@ -46,28 +46,10 @@ function hasTurnRelay(rtcConfiguration: RTCConfiguration) {
   });
 }
 
-function getRemotePlaybackBlockedMessage() {
-  return "Remote audio is waiting for a browser interaction. Click anywhere or use a control to resume playback.";
-}
-
 function getPeerConnectionFailedMessage(hasTurnRelayConfigured: boolean) {
-  if (!hasTurnRelayConfigured) {
-    return "Peer audio connection failed. TURN relay is not configured, so callers on different networks may not hear each other.";
-  }
+  if (!hasTurnRelayConfigured) return "Peer audio connection failed. TURN relay is not configured, so callers on different networks may not hear each other.";
 
   return "Peer audio connection failed. Check network access and reconnect.";
-}
-
-function getRealtimeReconnectingMessage() {
-  return "Realtime connection lost. Reconnecting...";
-}
-
-function getSessionUnavailableMessage() {
-  return "Realtime session expired. Reconnect from the access terminal.";
-}
-
-function getSessionTakenOverMessage() {
-  return "Realtime session moved to another browser tab or window.";
 }
 
 function getMicrophoneUnavailableMessage() {
@@ -75,9 +57,7 @@ function getMicrophoneUnavailableMessage() {
     window.location.hostname === "localhost" ||
     window.location.hostname === "127.0.0.1";
 
-  if (!window.isSecureContext && !isLocalhost) {
-    return "Microphone access requires HTTPS or localhost.";
-  }
+  if (!window.isSecureContext && !isLocalhost) return "Microphone access requires HTTPS or localhost.";
 
   return "Microphone access is unavailable in this browser.";
 }
@@ -87,39 +67,35 @@ function supportsScreenShare() {
 }
 
 function getInitialScreenShareStatus(): ScreenShareStatus {
-  if (typeof navigator === "undefined") {
-    return "idle";
-  }
+  if (typeof navigator === "undefined") return ScreenShareStatus.Idle;
 
-  return supportsScreenShare() ? "idle" : "unsupported";
+  return supportsScreenShare() ? ScreenShareStatus.Idle : ScreenShareStatus.Unsupported;
 }
 
-function getScreenShareUnavailableMessage() {
-  return "Screen sharing is available in desktop Chromium browsers with display capture support.";
-}
+const remotePlaybackBlockedMessage = "Remote audio is waiting for a browser interaction. Click anywhere or use a control to resume playback.";
+const realtimeReconnectingMessage = "Realtime connection lost. Reconnecting...";
+const sessionUnavailableMessage = "Realtime session expired. Reconnect from the access terminal.";
+const sessionTakenOverMessage = "Realtime session moved to another browser tab or window.";
+const screenShareUnavailableMessage = "Screen sharing is available in desktop Chromium browsers with display capture support.";
+const screenShareCancelledMessage = "Screen sharing was cancelled before it started.";
+const screenShareFailedMessage = "Screen sharing could not start. Try again.";
+const screenShareConnectionFailedMessage = "Screen share connection failed. Ask the presenter to restart sharing.";
+const screenShareNotReadyMessage = "Realtime connection is not ready for screen sharing yet.";
+const screenShareAfkMessage = "Return from AFK to share your screen.";
 
-function getScreenShareCancelledMessage() {
-  return "Screen sharing was cancelled before it started.";
-}
-
-function getScreenShareFailedMessage() {
-  return "Screen sharing could not start. Try again.";
-}
-
-function getScreenShareConnectionFailedMessage() {
-  return "Screen share connection failed. Ask the presenter to restart sharing.";
-}
-
-function getScreenShareNotReadyMessage() {
-  return "Realtime connection is not ready for screen sharing yet.";
+interface PresenceState {
+  isMuted: boolean;
+  isSpeaking: boolean;
+  isAfk: boolean;
 }
 
 export function useVoiceRoom() {
   const initialScreenShareStatus = getInitialScreenShareStatus();
   const [users, setUsers] = useState<RoomUser[]>([]);
   const [isMuted, setIsMuted] = useState(false);
+  const [isAfk, setIsAfk] = useState(false);
   const [connectionState, setConnectionState] =
-    useState<ConnectionState>("requesting-media");
+    useState<ConnectionState>(ConnectionState.RequestingMedia);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [audioProcessingMode, setAudioProcessingMode] =
@@ -160,7 +136,9 @@ export function useVoiceRoom() {
   const reconnectTimeoutRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const manualDisconnectRef = useRef(false);
+  const manualMutedRef = useRef(false);
   const isMutedRef = useRef(false);
+  const isAfkRef = useRef(false);
   const speakingRef = useRef(false);
   const hasTurnRelayRef = useRef(false);
   const failedPeersRef = useRef(new Set<string>());
@@ -239,7 +217,37 @@ export function useVoiceRoom() {
     return usersRef.current.find((user) => user.id === userId)?.username ?? null;
   }
 
-  function syncPresence(nextMuted: boolean, nextSpeaking: boolean) {
+  function getUser(userId: string) {
+    return usersRef.current.find((user) => user.id === userId) ?? null;
+  }
+
+  function getEffectiveMuted(
+    options: { manualMuted?: boolean; isAfk?: boolean } = {},
+  ) {
+    const manualMuted = options.manualMuted ?? manualMutedRef.current;
+    const isAfk = options.isAfk ?? isAfkRef.current;
+    return manualMuted || isAfk;
+  }
+
+  function createPresenceState(
+    overrides: Partial<PresenceState> = {},
+  ): PresenceState {
+    const isAfk = overrides.isAfk ?? isAfkRef.current;
+    const isMuted = isAfk
+      ? true
+      : overrides.isMuted ?? getEffectiveMuted({ isAfk });
+    const isSpeaking =
+      isAfk || isMuted ? false : overrides.isSpeaking ?? speakingRef.current;
+
+    return {
+      isMuted,
+      isSpeaking,
+      isAfk,
+    };
+  }
+
+  function syncPresence(nextPresence: PresenceState) {
+    const presence = createPresenceState(nextPresence);
     const selfUserId = selfUserIdRef.current;
     if (selfUserId) {
       setUsersWithUpdater((previousUsers) =>
@@ -247,8 +255,9 @@ export function useVoiceRoom() {
           user.id === selfUserId
             ? {
                 ...user,
-                isMuted: nextMuted,
-                isSpeaking: nextMuted ? false : nextSpeaking,
+                isAfk: presence.isAfk,
+                isMuted: presence.isMuted,
+                isSpeaking: presence.isSpeaking,
               }
             : user,
         ),
@@ -257,9 +266,15 @@ export function useVoiceRoom() {
 
     sendEvent({
       type: "presence:update",
-      isMuted: nextMuted,
-      isSpeaking: nextMuted ? false : nextSpeaking,
+      isMuted: presence.isMuted,
+      isSpeaking: presence.isSpeaking,
+      isAfk: presence.isAfk,
     });
+  }
+
+  function setEffectiveMutedState(nextMuted: boolean) {
+    setIsMuted(nextMuted);
+    setTrackMute(nextMuted);
   }
 
   function setTrackMute(nextMuted: boolean) {
@@ -274,7 +289,7 @@ export function useVoiceRoom() {
 
   function syncMediaError() {
     if (blockedAudioPeersRef.current.size > 0) {
-      setMediaError(getRemotePlaybackBlockedMessage());
+      setMediaError(remotePlaybackBlockedMessage);
       return;
     }
 
@@ -336,7 +351,16 @@ export function useVoiceRoom() {
     syncMediaError();
   }
 
+  function canCreateAudioConnection(peerId: string) {
+    return !isAfkRef.current && getUser(peerId)?.isAfk !== true;
+  }
+
   function attachRemoteStream(peerId: string, stream: MediaStream) {
+    if (isAfkRef.current) {
+      cleanupAudioPeer(peerId);
+      return;
+    }
+
     let audio = audioElementsRef.current.get(peerId);
 
     if (!audio) {
@@ -379,6 +403,33 @@ export function useVoiceRoom() {
       audio.srcObject = null;
       audio.remove();
       audioElementsRef.current.delete(peerId);
+    }
+  }
+
+  function cleanupAllAudioPeers() {
+    const peerIds = new Set([
+      ...peerConnectionsRef.current.keys(),
+      ...audioElementsRef.current.keys(),
+      ...pendingIceCandidatesRef.current.keys(),
+    ]);
+
+    for (const peerId of peerIds) {
+      cleanupAudioPeer(peerId);
+    }
+
+    pendingIceCandidatesRef.current.clear();
+  }
+
+  function reconnectEligibleAudioPeers() {
+    const selfUserId = selfUserIdRef.current;
+    if (!selfUserId || isAfkRef.current) {
+      return;
+    }
+
+    for (const user of usersRef.current) {
+      if (user.id !== selfUserId && !user.isAfk) {
+        void createAudioOfferForPeer(user.id);
+      }
     }
   }
 
@@ -486,6 +537,11 @@ export function useVoiceRoom() {
       return;
     }
 
+    if (!canCreateAudioConnection(peerId)) {
+      cleanupAudioPeer(peerId);
+      return;
+    }
+
     const peer = ensureAudioPeerConnection(peerId);
     if (peer.signalingState !== "stable") {
       return;
@@ -505,6 +561,12 @@ export function useVoiceRoom() {
   }
 
   async function handleAudioSignal(fromUserId: string, signal: WebRtcSignal) {
+    if (isAfkRef.current) {
+      clearPeerFailure(fromUserId);
+      cleanupAudioPeer(fromUserId);
+      return;
+    }
+
     const peer = ensureAudioPeerConnection(fromUserId);
 
     if (signal.type === "offer") {
@@ -634,7 +696,7 @@ export function useVoiceRoom() {
         activeScreenShareUserIdRef.current !== selfUserIdRef.current
       ) {
         setActiveScreenStreamState(null);
-        setScreenShareError(getScreenShareConnectionFailedMessage());
+        setScreenShareError(screenShareConnectionFailedMessage);
       }
 
       cleanupScreenPeer(peerId);
@@ -804,7 +866,7 @@ export function useVoiceRoom() {
     if (previousUserId === nextUserId) {
       if (nextUserId === selfUserId && localScreenStreamRef.current) {
         setActiveScreenStreamState(localScreenStreamRef.current);
-        setScreenShareStatusState("sharing");
+        setScreenShareStatusState(ScreenShareStatus.Sharing);
         setScreenShareError(null);
       }
       return;
@@ -839,7 +901,7 @@ export function useVoiceRoom() {
       }
 
       setActiveScreenStreamState(localScreenStream);
-      setScreenShareStatusState("sharing");
+      setScreenShareStatusState(ScreenShareStatus.Sharing);
       setScreenShareError(null);
       for (const user of usersRef.current) {
         if (user.id !== selfUserId) {
@@ -859,11 +921,25 @@ export function useVoiceRoom() {
       selfUserIdRef.current = event.selfUserId;
       rtcConfigurationRef.current = event.rtcConfiguration as RTCConfiguration;
       hasTurnRelayRef.current = hasTurnRelay(rtcConfigurationRef.current);
-      setUsersState(sortUsers(event.users));
+      const selfPresence = createPresenceState();
+      setUsersState(
+        sortUsers(
+          event.users.map((user) =>
+            user.id === event.selfUserId
+              ? {
+                  ...user,
+                  isAfk: selfPresence.isAfk,
+                  isMuted: selfPresence.isMuted,
+                  isSpeaking: selfPresence.isSpeaking,
+                }
+              : user,
+          ),
+        ),
+      );
       applyActiveScreenShareUpdate(event.activeScreenShareUserId);
 
       for (const user of event.users) {
-        if (user.id !== event.selfUserId) {
+        if (user.id !== event.selfUserId && !user.isAfk) {
           void createAudioOfferForPeer(user.id);
         }
       }
@@ -883,7 +959,24 @@ export function useVoiceRoom() {
     }
 
     if (event.type === "room:user-updated") {
+      const previousUser = getUser(event.user.id);
       updateUser(event.user);
+      if (event.user.id === selfUserIdRef.current) {
+        if (previousUser?.isAfk && !event.user.isAfk) {
+          reconnectEligibleAudioPeers();
+        }
+        return;
+      }
+
+      if (event.user.isAfk) {
+        clearPeerFailure(event.user.id);
+        cleanupAudioPeer(event.user.id);
+        return;
+      }
+
+      if (!previousUser || previousUser.isAfk) {
+        void createAudioOfferForPeer(event.user.id);
+      }
       return;
     }
 
@@ -952,7 +1045,7 @@ export function useVoiceRoom() {
 
       if (nextSpeaking !== speakingRef.current) {
         speakingRef.current = nextSpeaking;
-        syncPresence(isMutedRef.current, nextSpeaking);
+        syncPresence(createPresenceState({ isSpeaking: nextSpeaking }));
       }
 
       speechFrameRef.current = requestAnimationFrame(tick);
@@ -969,9 +1062,7 @@ export function useVoiceRoom() {
   }
 
   function resetRealtimeState() {
-    for (const peerId of [...peerConnectionsRef.current.keys()]) {
-      cleanupAudioPeer(peerId);
-    }
+    cleanupAllAudioPeers();
 
     cleanupAllScreenPeers();
     stopLocalScreenCapture();
@@ -1029,7 +1120,7 @@ export function useVoiceRoom() {
       clearReconnectTimeout();
       reconnectAttemptsRef.current = 0;
       resetRealtimeState();
-      setConnectionState("disconnected");
+      setConnectionState(ConnectionState.Disconnected);
       setConnectionError(message);
     }
 
@@ -1045,8 +1136,8 @@ export function useVoiceRoom() {
         5_000,
       );
 
-      setConnectionState("reconnecting");
-      setConnectionError(getRealtimeReconnectingMessage());
+      setConnectionState(ConnectionState.Reconnecting);
+      setConnectionError(realtimeReconnectingMessage);
       reconnectTimeoutRef.current = window.setTimeout(() => {
         void connectToRealtime();
       }, reconnectDelayMs);
@@ -1063,12 +1154,12 @@ export function useVoiceRoom() {
       wsRef.current = null;
 
       if (event.code === 4000 || event.code === 4002) {
-        stopReconnectingWithMessage(getSessionTakenOverMessage());
+        stopReconnectingWithMessage(sessionTakenOverMessage);
         return;
       }
 
       if (event.code === 4003 || event.code === 4004) {
-        stopReconnectingWithMessage(getSessionUnavailableMessage());
+        stopReconnectingWithMessage(sessionUnavailableMessage);
         return;
       }
 
@@ -1083,7 +1174,7 @@ export function useVoiceRoom() {
 
       clearReconnectTimeout();
       setConnectionState(
-        reconnectAttemptsRef.current > 0 ? "reconnecting" : "connecting",
+        reconnectAttemptsRef.current > 0 ? ConnectionState.Reconnecting : ConnectionState.Connecting,
       );
       if (reconnectAttemptsRef.current === 0) {
         setConnectionError(null);
@@ -1098,9 +1189,9 @@ export function useVoiceRoom() {
         }
 
         reconnectAttemptsRef.current = 0;
-        setConnectionState("connected");
+        setConnectionState(ConnectionState.Connected);
         setConnectionError(null);
-        syncPresence(isMutedRef.current, speakingRef.current);
+        syncPresence(createPresenceState());
       });
 
       ws.addEventListener("message", (event) => {
@@ -1125,7 +1216,7 @@ export function useVoiceRoom() {
           return;
         }
 
-        setConnectionError(getRealtimeReconnectingMessage());
+        setConnectionError(realtimeReconnectingMessage);
       });
 
       ws.addEventListener("close", (event) => {
@@ -1135,7 +1226,7 @@ export function useVoiceRoom() {
 
     async function connect() {
       try {
-        setConnectionState("requesting-media");
+        setConnectionState(ConnectionState.RequestingMedia);
         setConnectionError(null);
         setMediaError(null);
         setAudioProcessingMode("standard");
@@ -1166,7 +1257,7 @@ export function useVoiceRoom() {
         }
 
         localAudioRef.current = localAudio;
-        setTrackMute(isMutedRef.current);
+        setTrackMute(getEffectiveMuted());
         startSpeechDetection(localAudio.analyser);
         connectToRealtime();
       } catch (cause) {
@@ -1174,7 +1265,7 @@ export function useVoiceRoom() {
           return;
         }
 
-        setConnectionState("disconnected");
+        setConnectionState(ConnectionState.Disconnected);
         setConnectionError(
           cause instanceof Error
             ? cause.message
@@ -1209,48 +1300,96 @@ export function useVoiceRoom() {
   }, []);
 
   function toggleMute() {
-    const nextMuted = !isMutedRef.current;
-    setIsMuted(nextMuted);
-    setTrackMute(nextMuted);
-
-    if (nextMuted && speakingRef.current) {
-      speakingRef.current = false;
-      syncPresence(nextMuted, false);
+    if (isAfkRef.current) {
       return;
     }
 
-    syncPresence(nextMuted, speakingRef.current);
+    const nextManualMuted = !manualMutedRef.current;
+    manualMutedRef.current = nextManualMuted;
+    const nextMuted = getEffectiveMuted({ manualMuted: nextManualMuted });
+    setEffectiveMutedState(nextMuted);
+
+    if (nextMuted && speakingRef.current) {
+      speakingRef.current = false;
+      syncPresence(createPresenceState({ isMuted: nextMuted, isSpeaking: false }));
+      return;
+    }
+
+    syncPresence(createPresenceState({ isMuted: nextMuted }));
+  }
+
+  function toggleAfk() {
+    const nextAfk = !isAfkRef.current;
+    isAfkRef.current = nextAfk;
+    setIsAfk(nextAfk);
+    setScreenShareError((previousError) =>
+      previousError === screenShareAfkMessage ? null : previousError,
+    );
+
+    const nextMuted = getEffectiveMuted({ isAfk: nextAfk });
+    setEffectiveMutedState(nextMuted);
+
+    if (nextAfk) {
+      speakingRef.current = false;
+      syncPresence(
+        createPresenceState({
+          isAfk: true,
+          isMuted: true,
+          isSpeaking: false,
+        }),
+      );
+      if (activeScreenShareUserIdRef.current === selfUserIdRef.current) {
+        stopScreenShare();
+      }
+      cleanupAllAudioPeers();
+      return;
+    }
+
+    syncPresence(
+      createPresenceState({
+        isAfk: false,
+        isMuted: nextMuted,
+        isSpeaking: nextMuted ? false : speakingRef.current,
+      }),
+    );
+    reconnectEligibleAudioPeers();
   }
 
   async function startScreenShare() {
     if (
-      screenShareStatusRef.current === "requesting" ||
-      screenShareStatusRef.current === "starting" ||
-      screenShareStatusRef.current === "sharing" ||
-      screenShareStatusRef.current === "stopping"
+      screenShareStatusRef.current === ScreenShareStatus.Requesting ||
+      screenShareStatusRef.current === ScreenShareStatus.Starting ||
+      screenShareStatusRef.current === ScreenShareStatus.Sharing ||
+      screenShareStatusRef.current === ScreenShareStatus.Stopping
     ) {
       return;
     }
 
     if (!supportsScreenShare()) {
-      setScreenShareStatusState("unsupported");
-      setScreenShareError(getScreenShareUnavailableMessage());
+      setScreenShareStatusState(ScreenShareStatus.Unsupported);
+      setScreenShareError(screenShareUnavailableMessage);
+      return;
+    }
+
+    if (isAfkRef.current) {
+      setScreenShareNotice(null);
+      setScreenShareError(screenShareAfkMessage);
       return;
     }
 
     if (
-      connectionState === "disconnected" ||
+      connectionState === ConnectionState.Disconnected ||
       !selfUserIdRef.current ||
       !wsRef.current ||
       wsRef.current.readyState !== WebSocket.OPEN
     ) {
-      setScreenShareError(getScreenShareNotReadyMessage());
+      setScreenShareError(screenShareNotReadyMessage);
       return;
     }
 
     setScreenShareNotice(null);
     setScreenShareError(null);
-    setScreenShareStatusState("requesting");
+    setScreenShareStatusState(ScreenShareStatus.Requesting);
 
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -1268,7 +1407,7 @@ export function useVoiceRoom() {
           streamTrack.stop();
         }
         setScreenShareStatusState(getInitialScreenShareStatus());
-        setScreenShareError(getScreenShareFailedMessage());
+        setScreenShareError(screenShareFailedMessage);
         return;
       }
 
@@ -1281,7 +1420,7 @@ export function useVoiceRoom() {
       };
 
       localScreenStreamRef.current = stream;
-      setScreenShareStatusState("starting");
+      setScreenShareStatusState(ScreenShareStatus.Starting);
       sendEvent({
         type: "screen-share:start",
       });
@@ -1291,9 +1430,9 @@ export function useVoiceRoom() {
         cause instanceof DOMException &&
         (cause.name === "AbortError" || cause.name === "NotAllowedError")
       ) {
-        setScreenShareError(getScreenShareCancelledMessage());
+        setScreenShareError(screenShareCancelledMessage);
       } else {
-        setScreenShareError(getScreenShareFailedMessage());
+        setScreenShareError(screenShareFailedMessage);
       }
     }
   }
@@ -1313,7 +1452,7 @@ export function useVoiceRoom() {
     }
 
     if (notifyServer && wasActivePresenter) {
-      setScreenShareStatusState("stopping");
+      setScreenShareStatusState(ScreenShareStatus.Stopping);
     } else {
       setScreenShareStatusState(getInitialScreenShareStatus());
     }
@@ -1335,13 +1474,14 @@ export function useVoiceRoom() {
     manualDisconnectRef.current = true;
     teardownRoomConnection();
     setUsersState([]);
-    setConnectionState("disconnected");
+    setConnectionState(ConnectionState.Disconnected);
   }
 
   return {
     users,
     selfUserId: selfUserIdRef.current,
     isMuted,
+    isAfk,
     connectionState,
     error: connectionError ?? mediaError,
     audioProcessingMode,
@@ -1352,6 +1492,7 @@ export function useVoiceRoom() {
     screenShareError,
     screenShareNotice,
     toggleMute,
+    toggleAfk,
     startScreenShare,
     stopScreenShare,
     disconnect,

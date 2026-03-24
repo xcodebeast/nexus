@@ -536,6 +536,7 @@ const server = serve<SocketData>({
       const participant: ParticipantRecord = {
         id: session.id,
         username: session.username,
+        isAfk: false,
         isMuted: false,
         isSpeaking: false,
         connectedAt: Date.now(),
@@ -581,8 +582,10 @@ const server = serve<SocketData>({
       if (event.type === "presence:update") {
         const nextParticipant: ParticipantRecord = {
           ...participant,
-          isMuted: event.isMuted,
-          isSpeaking: event.isMuted ? false : event.isSpeaking,
+          isAfk: event.isAfk,
+          isMuted: event.isAfk ? true : event.isMuted,
+          isSpeaking:
+            event.isAfk || event.isMuted ? false : event.isSpeaking,
         };
 
         participants.set(session.id, nextParticipant);
@@ -590,10 +593,24 @@ const server = serve<SocketData>({
           type: "room:user-updated",
           user: nextParticipant,
         });
+        if (activeScreenShareUserId === session.id && nextParticipant.isAfk) {
+          activeScreenShareUserId = null;
+          broadcastScreenShareState();
+        }
         return;
       }
 
       if (event.type === "screen-share:start") {
+        if (participant.isAfk) {
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              message: "Return from AFK before sharing your screen.",
+            } satisfies ServerEvent),
+          );
+          return;
+        }
+
         activeScreenShareUserId = session.id;
         broadcastScreenShareState();
         return;
@@ -618,6 +635,14 @@ const server = serve<SocketData>({
               "Screen sharing signals must be exchanged with the active presenter.",
           } satisfies ServerEvent),
         );
+        return;
+      }
+
+      const targetParticipant = participants.get(event.targetUserId);
+      if (
+        event.channel === "audio" &&
+        (participant.isAfk || targetParticipant?.isAfk)
+      ) {
         return;
       }
 

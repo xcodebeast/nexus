@@ -3,6 +3,10 @@ import { appConfig } from "../src/lib/config";
 
 type InitScript = () => void;
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function createVoiceContext(
   browser: Browser,
   initScripts: InitScript[] = [],
@@ -91,6 +95,32 @@ async function expectRemoteAudioPlaying(page: Page) {
     });
 }
 
+async function expectNoRemoteAudio(page: Page) {
+  await expect
+    .poll(async () => {
+      return page.evaluate(() =>
+        document.querySelectorAll("audio[data-peer-id]").length,
+      );
+    })
+    .toBe(0);
+}
+
+async function expectParticipantAfk(page: Page, username: string) {
+  await expect(
+    page.getByRole("status", {
+      name: new RegExp(`${escapeRegExp(username)} is AFK`, "i"),
+    }),
+  ).toBeVisible();
+}
+
+async function expectParticipantNotAfk(page: Page, username: string) {
+  await expect(
+    page.getByRole("status", {
+      name: new RegExp(`${escapeRegExp(username)} is AFK`, "i"),
+    }),
+  ).toHaveCount(0);
+}
+
 async function expectGeneratedTurnConfig(page: Page) {
   await expect
     .poll(async () => {
@@ -153,6 +183,12 @@ async function clickScreenShare(page: Page) {
 
 async function clickStopScreenShare(page: Page) {
   await page.getByRole("button", { name: /stop sharing/i }).click();
+}
+
+async function clickAfk(page: Page) {
+  await page
+    .getByRole("button", { name: /go afk|return from afk/i })
+    .click();
 }
 
 async function expectScreenStageVideo(page: Page, presenterName: string) {
@@ -718,6 +754,89 @@ test("shows a clear error when microphone APIs are unavailable", async ({
   await expect(page.getByRole("button", { name: /disconnect/i })).toBeVisible();
 
   await context.close();
+});
+
+test("AFK keeps room presence while disconnecting audio until return", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser);
+  const bobContext = await createVoiceContext(browser);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+
+  await expectRemoteAudioPlaying(alicePage);
+  await expectRemoteAudioPlaying(bobPage);
+
+  await clickAfk(alicePage);
+
+  await expectRoomPresence(alicePage, 2, ["Alice (YOU)", "Bob"]);
+  await expectRoomPresence(bobPage, 2, ["Bob (YOU)", "Alice"]);
+  await expect(alicePage.getByText(/AFK: mic and room audio paused\./i)).toBeVisible();
+  await expect(
+    alicePage.getByRole("button", { name: /unmute microphone/i }),
+  ).toBeDisabled();
+  await expectParticipantAfk(alicePage, "Alice (YOU)");
+  await expectParticipantAfk(bobPage, "Alice");
+  await expectNoRemoteAudio(alicePage);
+  await expectNoRemoteAudio(bobPage);
+  await expect(
+    alicePage.getByText(/peer audio connection failed/i),
+  ).toHaveCount(0);
+  await expect(
+    bobPage.getByText(/peer audio connection failed/i),
+  ).toHaveCount(0);
+
+  await clickAfk(alicePage);
+
+  await expect(alicePage.getByText(/AFK: mic and room audio paused\./i)).toHaveCount(0);
+  await expectParticipantNotAfk(alicePage, "Alice (YOU)");
+  await expectParticipantNotAfk(bobPage, "Alice");
+  await expect(
+    alicePage.getByRole("button", { name: /mute microphone/i }),
+  ).toBeEnabled();
+  await expectRemoteAudioPlaying(alicePage);
+  await expectRemoteAudioPlaying(bobPage);
+
+  await aliceContext.close();
+  await bobContext.close();
+});
+
+test("AFK stops active screen sharing and blocks restarting until return", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [installScreenShareMocks]);
+  const bobContext = await createVoiceContext(browser, [installScreenShareMocks]);
+  const alicePage = await aliceContext.newPage();
+  const bobPage = await bobContext.newPage();
+
+  await login(alicePage, "Alice");
+  await login(bobPage, "Bob");
+
+  await clickScreenShare(alicePage);
+  await expectScreenStageVideo(alicePage, "Alice");
+  await expectScreenStageVideo(bobPage, "Alice");
+
+  await clickAfk(alicePage);
+
+  await expectParticipantAfk(bobPage, "Alice");
+  await expectScreenShareIdle(alicePage);
+  await expectScreenShareIdle(bobPage);
+  await expect(
+    alicePage.getByRole("button", { name: /share screen/i }),
+  ).toBeDisabled();
+
+  await clickAfk(alicePage);
+
+  await expectParticipantNotAfk(bobPage, "Alice");
+  await expect(
+    alicePage.getByRole("button", { name: /share screen/i }),
+  ).toBeEnabled();
+
+  await aliceContext.close();
+  await bobContext.close();
 });
 
 test("starts a screen share and renders the inline stage for local and remote viewers", async ({

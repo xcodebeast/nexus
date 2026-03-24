@@ -12,6 +12,7 @@ export interface RtcConfigurationPayload {
 export interface RoomUser {
   id: string;
   username: string;
+  isAfk: boolean;
   isMuted: boolean;
   isSpeaking: boolean;
   connectedAt: number;
@@ -58,6 +59,7 @@ export type ClientEvent =
       type: "presence:update";
       isMuted: boolean;
       isSpeaking: boolean;
+      isAfk: boolean;
     }
   | {
       type: "screen-share:start";
