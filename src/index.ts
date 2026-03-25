@@ -1,5 +1,7 @@
 import { serve, type ServerWebSocket } from "bun";
 import index from "./index.html";
+import { appConfig } from "./lib/config";
+import { pwaManifestIcons, pwaShellUrls } from "./lib/pwa";
 import type {
   ClientEvent,
   ErrorPayload,
@@ -9,6 +11,7 @@ import type {
   RoomUser,
   ServerEvent,
   SessionPayload,
+  WebRtcSignal,
 } from "./lib/protocol";
 
 const SESSION_COOKIE_NAME = "nexus_session";
@@ -24,6 +27,44 @@ const CLOUDFLARE_TURN_MOCK_ICE_SERVERS = parseMockIceServers();
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
 const HOSTNAME = process.env.HOST ?? "0.0.0.0";
 const RTC_CONFIGURATION_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+const NO_STORE_CACHE_CONTROL = "no-store";
+const REVALIDATE_CACHE_CONTROL = "no-cache, max-age=0, must-revalidate";
+const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const faviconFile = Bun.file(new URL("./assets/favicon.ico", import.meta.url));
+const appleTouchIconFile = Bun.file(
+  new URL("./assets/pwa/apple-touch-icon.png", import.meta.url),
+);
+const pwaIcon192File = Bun.file(
+  new URL("./assets/pwa/icon-192.png", import.meta.url),
+);
+const pwaIcon512File = Bun.file(
+  new URL("./assets/pwa/icon-512.png", import.meta.url),
+);
+const pwaIconMaskableFile = Bun.file(
+  new URL("./assets/pwa/icon-maskable-512.png", import.meta.url),
+);
+const serviceWorkerTemplate = await Bun.file(
+  new URL("./pwa/sw.js", import.meta.url),
+).text();
+const serviceWorkerSource = serviceWorkerTemplate
+  .replaceAll("__NEXUS_CACHE_VERSION__", appConfig.pwa.cacheVersion)
+  .replace("__NEXUS_SHELL_URLS__", JSON.stringify(pwaShellUrls));
+const manifestSource = JSON.stringify(
+  {
+    id: "/",
+    name: appConfig.pwa.name,
+    short_name: appConfig.pwa.shortName,
+    description: appConfig.pwa.description,
+    start_url: "/",
+    scope: "/",
+    display: appConfig.pwa.display,
+    background_color: appConfig.pwa.backgroundColor,
+    theme_color: appConfig.pwa.themeColor,
+    icons: pwaManifestIcons,
+  },
+  null,
+  2,
+);
 
 interface SessionRecord {
   id: string;
@@ -274,12 +315,63 @@ if (process.env.NODE_ENV === "production" && hasCloudflareTurnConfigured()) {
   );
 }
 
+function mergeHeaders(
+  headersInit: HeadersInit | undefined,
+  nextHeaders: Record<string, string>,
+) {
+  const headers = new Headers(headersInit);
+
+  for (const [key, value] of Object.entries(nextHeaders)) {
+    headers.set(key, value);
+  }
+
+  return headers;
+}
+
 function json<T>(payload: T, init: ResponseInit = {}) {
-  return Response.json(payload, init);
+  return Response.json(payload, {
+    ...init,
+    headers: mergeHeaders(init.headers, {
+      "Cache-Control": NO_STORE_CACHE_CONTROL,
+    }),
+  });
 }
 
 function errorResponse(status: number, message: string) {
   return json<ErrorPayload>({ message }, { status });
+}
+
+function fileResponse(
+  file: Blob,
+  contentType: string,
+  cacheControl: string,
+  init: ResponseInit = {},
+) {
+  return new Response(file, {
+    ...init,
+    headers: mergeHeaders(init.headers, {
+      "Cache-Control": cacheControl,
+      "Content-Type": contentType,
+    }),
+  });
+}
+
+function manifestResponse() {
+  return new Response(manifestSource, {
+    headers: {
+      "Cache-Control": REVALIDATE_CACHE_CONTROL,
+      "Content-Type": "application/manifest+json",
+    },
+  });
+}
+
+function serviceWorkerResponse() {
+  return new Response(serviceWorkerSource, {
+    headers: {
+      "Cache-Control": REVALIDATE_CACHE_CONTROL,
+      "Content-Type": "application/javascript; charset=utf-8",
+    },
+  });
 }
 
 function parseCookies(request: Request) {
@@ -463,9 +555,10 @@ function handleDeleteSession(request: Request) {
 
   return new Response(null, {
     status: 204,
-    headers: {
+    headers: mergeHeaders(undefined, {
+      "Cache-Control": NO_STORE_CACHE_CONTROL,
       "Set-Cookie": clearSessionCookie(),
-    },
+    }),
   });
 }
 
@@ -514,13 +607,50 @@ const server = serve<SocketData>({
   port: Number.isFinite(PORT) ? PORT : 3000,
   hostname: HOSTNAME,
   routes: {
-    "/api/health": () => new Response("ok"),
+    "/api/health": () =>
+      new Response("ok", {
+        headers: {
+          "Cache-Control": NO_STORE_CACHE_CONTROL,
+        },
+      }),
     "/api/session": {
       GET: handleGetSession,
       POST: handleCreateSession,
       DELETE: handleDeleteSession,
     },
     "/api/ws": handleWebSocketUpgrade,
+    "/manifest.webmanifest": manifestResponse,
+    "/sw.js": serviceWorkerResponse,
+    "/favicon.ico": () =>
+      fileResponse(
+        faviconFile,
+        "image/x-icon",
+        IMMUTABLE_CACHE_CONTROL,
+      ),
+    "/apple-touch-icon.png": () =>
+      fileResponse(
+        appleTouchIconFile,
+        "image/png",
+        IMMUTABLE_CACHE_CONTROL,
+      ),
+    "/pwa/icon-192.png": () =>
+      fileResponse(
+        pwaIcon192File,
+        "image/png",
+        IMMUTABLE_CACHE_CONTROL,
+      ),
+    "/pwa/icon-512.png": () =>
+      fileResponse(
+        pwaIcon512File,
+        "image/png",
+        IMMUTABLE_CACHE_CONTROL,
+      ),
+    "/pwa/icon-maskable-512.png": () =>
+      fileResponse(
+        pwaIconMaskableFile,
+        "image/png",
+        IMMUTABLE_CACHE_CONTROL,
+      ),
     "/*": index,
   },
 

@@ -68,6 +68,11 @@ Compose reads local environment variables and wires the service to port `3000` b
 - Browser-to-browser audio transport over WebRTC
 - Clean disconnect flow to return to the intro screen
 
+### Progressive Web App Shell
+- Installable desktop-first PWA with a standalone app manifest
+- Cached application shell for repeat launches and offline reopen after one successful online visit
+- Explicit offline messaging so the shell remains usable without implying voice, auth, or presence work offline
+
 ## Tech Stack
 
 - **Runtime**: Bun
@@ -91,6 +96,36 @@ Only one user can present at a time. If another user starts screen sharing, the 
 Microphone access requires a secure context in the browser. Use HTTPS in deployed environments, or `localhost` during development.
 When the browser supports AudioWorklet, Nexus denoises the outgoing mic stream locally before it is sent to peers. If RNNoise cannot start or the browser lacks support, Nexus falls back to browser DSP/pass-through without breaking the call.
 Screen sharing is optimized for desktop Chromium browsers in the current small-room peer-mesh architecture.
+
+## PWA Support
+
+Nexus now supports a desktop-first Progressive Web App shell:
+
+- Installability is optimized for Chromium-based desktop browsers
+- The shell can reopen offline after it has been loaded successfully once online
+- Voice rooms, authentication, websocket presence, and screen sharing remain online-only
+- Service worker updates are applied on the next launch instead of interrupting an active session
+
+For normal local development, the service worker stays disabled on `localhost` to avoid stale assets during HMR.
+To test the PWA path locally, open:
+
+```text
+http://localhost:3000/?pwa=1
+```
+
+You can combine it with intro skipping for deterministic testing:
+
+```text
+http://localhost:3000/?skipIntro=1&pwa=1
+```
+
+Run the focused PWA end-to-end coverage with:
+
+```bash
+bun run test:e2e:pwa
+```
+
+Whenever a release changes cached shell assets, bump `appConfig.version` in `src/lib/config.ts` so the service worker cache version changes with it.
 
 ## Environment
 

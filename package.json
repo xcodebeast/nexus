@@ -7,7 +7,8 @@
     "dev": "bun --hot src/index.ts",
     "start": "NODE_ENV=production bun src/index.ts",
     "build": "bun run build.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:pwa": "playwright test --config=playwright-pwa.config.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

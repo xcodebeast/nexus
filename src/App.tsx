@@ -5,8 +5,10 @@ import { MatrixRain } from "@/components/matrix-rain";
 import { LoginModal } from "@/components/login-modal";
 import { VoiceRoom } from "@/components/voice-room";
 import { Button } from "@/components/ui/button";
+import { useNetworkStatus } from "@/hooks/use-network-status";
 import { createSession, deleteSession, getSession } from "@/lib/api";
 import { appConfig } from "@/lib/config";
+import { offlineConnectMessage } from "@/lib/pwa";
 
 type AppState = "intro" | "connect" | "room";
 
@@ -45,6 +47,7 @@ function markIntroAsSeen() {
 
 export function App() {
   const shouldBypassIntro = shouldSkipIntro() || hasSeenIntro();
+  const { isOffline } = useNetworkStatus();
   const [appState, setAppState] = useState<AppState>(() =>
     shouldBypassIntro ? "connect" : "intro",
   );
@@ -89,6 +92,10 @@ export function App() {
   };
 
   const handleConnect = () => {
+    if (isOffline) {
+      return;
+    }
+
     setShowLoginModal(true);
   };
 
@@ -137,6 +144,7 @@ export function App() {
             </h1>
             <Button
               onClick={handleConnect}
+              disabled={isOffline}
               className="
                 px-8 py-6 text-lg font-mono uppercase tracking-widest
                 bg-transparent border-2 border-primary text-primary
@@ -149,6 +157,14 @@ export function App() {
             >
               {">"} Connect
             </Button>
+            {isOffline && (
+              <p
+                className="mt-6 max-w-sm text-xs font-mono text-amber-300 animate-in fade-in duration-700"
+                data-testid="connect-offline-notice"
+              >
+                {offlineConnectMessage}
+              </p>
+            )}
             <p className="mt-6 text-xs font-mono text-muted-foreground animate-in fade-in duration-1000 delay-500">
               Voice communication channel
             </p>
@@ -158,12 +174,17 @@ export function App() {
 
       {appState === "room" && currentUser && (
         <div className="relative z-10">
-          <VoiceRoom currentUser={currentUser} onDisconnect={handleDisconnect} />
+          <VoiceRoom
+            currentUser={currentUser}
+            isOffline={isOffline}
+            onDisconnect={handleDisconnect}
+          />
         </div>
       )}
 
       <LoginModal
         isOpen={showLoginModal}
+        isOffline={isOffline}
         onClose={() => setShowLoginModal(false)}
         onLogin={handleLogin}
         savedUsername={savedUsername}

@@ -23,6 +23,23 @@ export type ShortcutBinding = {
   ariaKeyshortcuts: string;
 };
 
+type PwaConfig = {
+  /** Full app name surfaced in the web app manifest. */
+  name: string;
+  /** Short app name used for install surfaces where space is limited. */
+  shortName: string;
+  /** Install prompt description shown in supported browsers. */
+  description: string;
+  /** Theme color used for browser and installed app chrome. */
+  themeColor: `#${string}`;
+  /** Background color used while the app shell is loading. */
+  backgroundColor: `#${string}`;
+  /** Display mode requested by the installed app. */
+  display: "standalone";
+  /** Cache version for the service worker shell cache. */
+  cacheVersion: string;
+};
+
 type Config = {
   /** Display name used across the application shell and room UI. */
   appName: string;
@@ -64,9 +81,13 @@ type Config = {
       bindings: Record<RoomShortcutActionId, ShortcutBinding>;
     };
   };
+  /** Progressive Web App metadata and cache configuration. */
+  pwa: PwaConfig;
   /** Semantic application version rendered in the footer and other metadata surfaces. */
   version: `${number}.${number}.${number}`;
 };
+
+const appVersion = "1.5.0" as const;
 
 export const appConfig = {
   appName: "NEXUS",
@@ -122,7 +143,17 @@ export const appConfig = {
       },
     },
   },
-  version: "1.4.1",
+  pwa: {
+    name: "Nexus",
+    shortName: "Nexus",
+    description:
+      "Minimal self-hosted voice chat with a Matrix-inspired interface.",
+    themeColor: "#0a0a0a",
+    backgroundColor: "#0a0a0a",
+    display: "standalone",
+    cacheVersion: appVersion,
+  },
+  version: appVersion,
 } as const satisfies Config;
 
 export function resolveShortcutPlatform(

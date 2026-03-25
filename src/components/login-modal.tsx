@@ -9,15 +9,23 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { offlineConnectMessage } from "@/lib/pwa";
 
 interface LoginModalProps {
   isOpen: boolean;
+  isOffline: boolean;
   onClose: () => void;
   onLogin: (username: string, password: string) => Promise<void>;
   savedUsername: string | null;
 }
 
-export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginModalProps) {
+export function LoginModal({
+  isOpen,
+  isOffline,
+  onClose,
+  onLogin,
+  savedUsername,
+}: LoginModalProps) {
   const [username, setUsername] = useState(savedUsername || "");
   const [password, setPassword] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -29,6 +37,15 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
       setUsername(savedUsername);
     }
   }, [savedUsername]);
+
+  useEffect(() => {
+    if (!isOffline) {
+      return;
+    }
+
+    setErrorMessage(null);
+    setShake(false);
+  }, [isOffline]);
 
   const triggerError = (message: string) => {
     setErrorMessage(message);
@@ -43,6 +60,10 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (isOffline) {
+      return;
+    }
 
     const nextUsername = username.trim();
     if (!nextUsername) {
@@ -67,6 +88,9 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
     }
   };
 
+  const feedbackMessage = isOffline ? offlineConnectMessage : errorMessage;
+  const showErrorState = Boolean(errorMessage) && !isOffline;
+
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent 
@@ -74,10 +98,10 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
           bg-card/95 border-primary/30 backdrop-blur-md
           transition-all duration-300
           ${shake ? "animate-shake" : ""}
-          ${errorMessage ? "border-destructive shadow-[0_0_30px_rgba(255,0,64,0.3)]" : "shadow-[0_0_30px_rgba(0,255,65,0.2)]"}
+          ${showErrorState ? "border-destructive shadow-[0_0_30px_rgba(255,0,64,0.3)]" : "shadow-[0_0_30px_rgba(0,255,65,0.2)]"}
         `}
         style={{
-          filter: errorMessage ? "blur(1px)" : "none",
+          filter: showErrorState ? "blur(1px)" : "none",
         }}
       >
         <DialogHeader>
@@ -127,24 +151,29 @@ export function LoginModal({ isOpen, onClose, onLogin, savedUsername }: LoginMod
               className={`
                 bg-input border-primary/30 text-primary font-mono placeholder:text-muted-foreground/50 
                 focus:border-primary focus:ring-primary/20
-                ${errorMessage ? "border-destructive bg-destructive/10" : ""}
+                ${showErrorState ? "border-destructive bg-destructive/10" : ""}
               `}
               placeholder="Enter password..."
               autoComplete="off"
             />
-            {errorMessage && (
-              <p className="text-destructive text-xs font-mono animate-pulse">
-                {errorMessage}
+            {feedbackMessage && (
+              <p
+                className={`text-xs font-mono ${isOffline ? "text-amber-300" : "text-destructive animate-pulse"}`}
+                data-testid={isOffline ? "login-offline-notice" : "login-error-message"}
+              >
+                {feedbackMessage}
               </p>
             )}
           </div>
           
           <Button 
             type="submit" 
-            disabled={isSubmitting}
+            disabled={isSubmitting || isOffline}
             className="w-full bg-primary text-primary-foreground hover:bg-primary/90 font-mono uppercase tracking-wider transition-all duration-300 hover:shadow-[0_0_20px_rgba(0,255,65,0.4)]"
           >
-            {isSubmitting ? (
+            {isOffline ? (
+              <>{">"} Offline</>
+            ) : isSubmitting ? (
               <>{">"} Connecting...</>
             ) : (
               <>{">"} Authenticate</>

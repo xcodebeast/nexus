@@ -19,6 +19,7 @@ import {
   getShortcutDisplayKeys,
   type RoomShortcutActionId,
 } from "@/lib/config";
+import { offlineRoomMessage } from "@/lib/pwa";
 import { cn } from "@/lib/utils";
 import {
   GithubIcon,
@@ -46,6 +47,7 @@ const getStatusLabel = (connectionState: ConnectionState) =>
 
 interface VoiceRoomProps {
   currentUser: string;
+  isOffline: boolean;
   onDisconnect: () => Promise<void> | void;
 }
 
@@ -62,7 +64,11 @@ type RoomControlButtonProps = {
   variant: ComponentProps<typeof Button>["variant"];
 };
 
-export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
+export function VoiceRoom({
+  currentUser,
+  isOffline,
+  onDisconnect,
+}: VoiceRoomProps) {
   const {
     users,
     selfUserId,
@@ -259,6 +265,14 @@ export function VoiceRoom({ currentUser, onDisconnect }: VoiceRoomProps) {
         {isAfk && (
           <p className="mt-2 text-xs font-mono uppercase tracking-[0.2em] text-amber-300">
             AFK: mic and room audio paused.
+          </p>
+        )}
+        {isOffline && (
+          <p
+            className="mt-2 text-xs font-mono text-amber-300"
+            data-testid="room-offline-notice"
+          >
+            {offlineRoomMessage}
           </p>
         )}
         {error && (
