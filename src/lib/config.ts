@@ -89,7 +89,7 @@ type Config = {
   version: `${number}.${number}.${number}`;
 };
 
-const appVersion = "1.7.1" as const;
+const appVersion = "1.7.2" as const;
 
 export const appConfig = {
   appName: "NEXUS",

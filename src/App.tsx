@@ -5,11 +5,11 @@ import { MatrixRain } from "@/components/matrix-rain";
 import { LoginModal } from "@/components/login-modal";
 import { VoiceRoom } from "@/components/voice-room";
 import { Button } from "@/components/ui/button";
+import { AppFooter } from "@/components/app-footer";
 import { useNetworkStatus } from "@/hooks/use-network-status";
 import { createSession, deleteSession, getSession } from "@/lib/api";
 import { appConfig } from "@/lib/config";
 import { offlineConnectMessage } from "@/lib/pwa";
-import { GithubIcon } from "lucide-react";
 
 type AppState = "intro" | "connect" | "room";
 
@@ -148,11 +148,10 @@ export function App() {
             <h1 className="text-4xl sm:text-6xl font-mono font-bold text-primary tracking-[0.3em] mb-8 animate-in fade-in slide-in-from-top-4 duration-300 drop-shadow-[0_0_15px_rgba(0,255,65,0.6)]">
               {appConfig.appName}
             </h1>
-            <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
-              <Button
-                onClick={handleConnect}
-                disabled={isOffline}
-                className="
+            <Button
+              onClick={handleConnect}
+              disabled={isOffline}
+              className="
                 px-8 py-6 text-lg font-mono uppercase tracking-widest
                 bg-transparent border-2 border-primary text-primary
                 hover:bg-primary hover:text-primary-foreground
@@ -161,24 +160,9 @@ export function App() {
                 hover:shadow-[0_0_40px_rgba(0,255,65,0.6)]
                 animate-in fade-in zoom-in-95 duration-200
               "
-              >
-                {">"} Connect
-              </Button>
-              <Button
-                asChild
-                variant="outline"
-                className="border-primary/40 bg-transparent px-6 py-6 font-mono uppercase tracking-wider text-primary/80 hover:border-primary hover:bg-primary/10"
-              >
-                <a
-                  href={appConfig.githubUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <GithubIcon />
-                  View repository
-                </a>
-              </Button>
-            </div>
+            >
+              {">"} Connect
+            </Button>
             {isOffline && (
               <p
                 className="mt-6 max-w-sm text-xs font-mono text-amber-300 animate-in fade-in duration-700"
@@ -191,6 +175,7 @@ export function App() {
               Voice communication channel
             </p>
           </div>
+          <AppFooter />
         </div>
       )}
 

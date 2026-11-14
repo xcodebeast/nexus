@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { AudioDeviceSettingsDialog } from "@/components/audio-device-settings-dialog";
+import { AppFooter } from "@/components/app-footer";
 import { CameraTile } from "@/components/camera-tile";
 import { Button } from "@/components/ui/button";
 import { ShortcutKeys } from "@/components/ui/shortcut-keys";
@@ -29,7 +30,6 @@ import {
 import { offlineRoomMessage } from "@/lib/pwa";
 import { cn } from "@/lib/utils";
 import {
-  GithubIcon,
   HeadphoneOffIcon,
   HeadphonesIcon,
   MicIcon,
@@ -484,7 +484,7 @@ export function VoiceRoom({
         </div>
       </TooltipProvider>
 
-      <Footer />
+      <AppFooter />
 
       <AudioDeviceSettingsDialog
         audioDeviceStatus={audioDeviceStatus}
@@ -556,28 +556,3 @@ const RoomControlButton = ({
     </Tooltip>
   );
 };
-
-const Footer = () => (
-  <div className="absolute bottom-4 text-center animate-in fade-in duration-1000 delay-500">
-    <div className="flex items-center gap-2 text-[10px] font-mono">
-      <a
-        target="_blank"
-        className="inline-flex items-center gap-2 text-muted-foreground/40 hover:text-foreground"
-        href={appConfig.githubUrl}
-        aria-label="GitHub Repository"
-        rel="noopener noreferrer"
-      >
-        <GithubIcon />
-        {appConfig.appName} {appConfig.version}
-      </a>
-      |
-      <a
-        target="_blank"
-        className="text-muted-foreground/40 hover:text-foreground"
-        href={appConfig.creatorWebsite}
-      >
-        {appConfig.creatorName}
-      </a>
-    </div>
-  </div>
-);
