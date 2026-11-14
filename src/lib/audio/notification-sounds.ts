@@ -2,6 +2,7 @@ export type NotificationCue =
   | "join"
   | "leave"
   | "afk"
+  | "afk-return"
   | "mute"
   | "unmute"
   | "screen-share-start"
@@ -46,6 +47,11 @@ const cueStepsById: Record<NotificationCue, readonly CueStep[]> = {
       type: "triangle",
     },
     { frequency: 349, durationMs: 85, gain: 0.12, type: "sine" },
+  ],
+  "afk-return": [
+    { frequency: 349, durationMs: 65, gain: 0.12, type: "triangle" },
+    { frequency: 554, durationMs: 70, gain: 0.14, type: "triangle" },
+    { frequency: 698, durationMs: 85, gain: 0.12, type: "triangle" },
   ],
   mute: [
     {

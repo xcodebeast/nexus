@@ -5,6 +5,7 @@ export type RoomShortcutActionId =
   | "afk"
   | "camera"
   | "screenShare"
+  | "whiteboard"
   | "disconnect";
 
 type ShortcutModifierConfig = {
@@ -88,7 +89,7 @@ type Config = {
   version: `${number}.${number}.${number}`;
 };
 
-const appVersion = "1.6.0" as const;
+const appVersion = "1.7.0" as const;
 
 export const appConfig = {
   appName: "NEXUS",
@@ -140,6 +141,11 @@ export const appConfig = {
           key: "s",
           displayKey: "S",
           ariaKeyshortcuts: "Control+S",
+        },
+        whiteboard: {
+          key: "b",
+          displayKey: "B",
+          ariaKeyshortcuts: "Control+B",
         },
         disconnect: {
           key: "d",

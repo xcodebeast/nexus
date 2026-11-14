@@ -1,4 +1,10 @@
-import { type ComponentProps, type ReactNode, useState } from "react";
+import {
+  type ComponentProps,
+  type ReactNode,
+  lazy,
+  Suspense,
+  useState,
+} from "react";
 import { AudioDeviceSettingsDialog } from "@/components/audio-device-settings-dialog";
 import { CameraTile } from "@/components/camera-tile";
 import { Button } from "@/components/ui/button";
@@ -33,9 +39,37 @@ import {
   Settings2Icon,
   VideoIcon,
   VideoOffIcon,
+  PenLineIcon,
 } from "lucide-react";
 import { ScreenStage } from "./screen-stage";
 import { VoiceAvatar } from "./voice-avatar";
+
+const Whiteboard = lazy(() =>
+  import("./whiteboard")
+    .then((module) => ({ default: module.Whiteboard }))
+    .catch(() => ({ default: WhiteboardLoadFailure })),
+);
+
+function WhiteboardLoadFailure({ onClose }: { onClose: () => void }) {
+  return (
+    <section
+      role="alert"
+      className="mb-8 rounded-lg border border-primary/30 bg-background p-4 text-sm font-mono text-primary"
+    >
+      <p>
+        The whiteboard could not load. Close it to continue in the room, or
+        reload Nexus to try again.
+      </p>
+      <Button
+        onClick={onClose}
+        variant="outline"
+        className="mt-3 border-primary/40"
+      >
+        Close whiteboard
+      </Button>
+    </section>
+  );
+}
 
 const statusToLabelMap = {
   [ConnectionState.RequestingMedia]: "Requesting microphone access",
@@ -73,6 +107,7 @@ export function VoiceRoom({
   onDisconnect,
 }: VoiceRoomProps) {
   const {
+    whiteboard,
     users,
     selfUserId,
     isMuted,
@@ -105,6 +140,10 @@ export function VoiceRoom({
     disconnect,
   } = useVoiceRoom();
   const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
+  const isWhiteboardOpen = whiteboard.isOpen;
+  const whiteboardToggleDisabled =
+    connectionState !== ConnectionState.Connected || !selfUserId;
+  const handleWhiteboardToggle = whiteboard.toggle;
 
   const handleDisconnect = async () => {
     disconnect();
@@ -192,6 +231,10 @@ export function VoiceRoom({
         disabled: false,
         onTrigger: handleDisconnect,
       },
+      whiteboard: {
+        disabled: whiteboardToggleDisabled,
+        onTrigger: handleWhiteboardToggle,
+      },
     },
   });
   const roomControlButtons: RoomControlButtonProps[] = [
@@ -268,6 +311,24 @@ export function VoiceRoom({
       variant: isSelfPresenting ? "destructive" : "outline",
     },
     {
+      actionId: "whiteboard",
+      ariaKeyshortcuts:
+        appConfig.roomControls.shortcuts.bindings.whiteboard.ariaKeyshortcuts,
+      className: cn(
+        "border-primary/50 px-6 font-mono uppercase tracking-wider transition-all duration-300",
+        isWhiteboardOpen
+          ? "bg-primary/20 text-primary"
+          : "text-primary hover:border-primary hover:bg-primary/10",
+      ),
+      disabled: whiteboardToggleDisabled,
+      icon: <PenLineIcon />,
+      isShortcutRevealActive,
+      label: isWhiteboardOpen ? "Hide whiteboard" : "Open whiteboard",
+      onPress: handleWhiteboardToggle,
+      shortcutKeys: getShortcutDisplayKeys("whiteboard", shortcutPlatform),
+      variant: "outline",
+    },
+    {
       actionId: "disconnect",
       ariaKeyshortcuts:
         appConfig.roomControls.shortcuts.bindings.disconnect.ariaKeyshortcuts,
@@ -284,7 +345,14 @@ export function VoiceRoom({
   ];
 
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center px-4 py-8">
+    <div
+      className={cn(
+        "relative flex min-h-screen flex-col items-center px-4 pb-24 pt-8",
+        activeScreenShareUserId || isWhiteboardOpen
+          ? "justify-start"
+          : "justify-center",
+      )}
+    >
       <div className="fixed right-4 top-4 z-30 sm:right-6 sm:top-6">
         <Button
           aria-label="Open audio settings"
@@ -345,6 +413,27 @@ export function VoiceRoom({
           </p>
         )}
       </div>
+
+      {isWhiteboardOpen && selfUserId && (
+        <Suspense
+          fallback={
+            <p className="mb-8 text-sm font-mono text-primary">
+              Opening whiteboard…
+            </p>
+          }
+        >
+          <Whiteboard
+            board={whiteboard}
+            selfUserId={selfUserId}
+            disabled={
+              isOffline ||
+              isAfk ||
+              connectionState !== ConnectionState.Connected
+            }
+            onClose={whiteboard.close}
+          />
+        </Suspense>
+      )}
 
       {activeScreenShareUserId && (
         <ScreenStage

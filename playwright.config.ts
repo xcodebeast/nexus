@@ -43,6 +43,7 @@ export default defineConfig({
     command: "bun src/index.ts",
     env: {
       ...process.env,
+      NODE_ENV: "production",
       PORT: E2E_PORT,
       NEXUS_PASSWORD: E2E_PASSWORD,
       NEXUS_PASSWORD_HASH: "",

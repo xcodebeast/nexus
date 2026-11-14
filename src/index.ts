@@ -1,6 +1,8 @@
 import { serve, type ServerWebSocket } from "bun";
 import index from "./index.html";
 import { appConfig } from "./lib/config";
+import { RoomWhiteboard } from "./lib/room-whiteboard";
+import { buildProductionFrontend } from "./lib/production-frontend";
 import { pwaManifestIcons, pwaShellUrls } from "./lib/pwa";
 import type {
   ClientEvent,
@@ -17,6 +19,7 @@ import type {
 const SESSION_COOKIE_NAME = "nexus_session";
 const ROOM_ID = process.env.NEXUS_ROOM_ID ?? "main";
 const ROOM_TOPIC = `room:${ROOM_ID}`;
+const WHITEBOARD_TOPIC = `${ROOM_TOPIC}:whiteboard`;
 const DEFAULT_PASSWORD = process.env.NEXUS_PASSWORD ?? "nexus";
 const CONFIGURED_PASSWORD_HASH = process.env.NEXUS_PASSWORD_HASH?.trim();
 const CLOUDFLARE_TURN_KEY_ID = process.env.CLOUDFLARE_TURN_KEY_ID?.trim();
@@ -78,11 +81,13 @@ interface ParticipantRecord extends RoomUser {}
 
 interface SocketData {
   sessionId: string;
+  whiteboardSubscribed?: boolean;
 }
 
 const sessions = new Map<string, SessionRecord>();
 const participants = new Map<string, ParticipantRecord>();
 const sockets = new Map<string, ServerWebSocket<SocketData>>();
+const whiteboard = new RoomWhiteboard();
 let activeScreenShareUserId: string | null = null;
 const defaultRtcConfiguration = buildStaticRtcConfiguration();
 const verifyPassword = await buildPasswordVerifier();
@@ -475,6 +480,8 @@ function removeParticipant(
   }
 
   participants.delete(sessionId);
+  whiteboard.removeParticipant(sessionId);
+  if (participants.size === 0) whiteboard.reset();
   broadcast({
     type: "room:user-left",
     userId: sessionId,
@@ -603,6 +610,11 @@ function safeParseEvent(message: string | Buffer<ArrayBuffer>) {
   }
 }
 
+const frontendRoutes =
+  process.env.NODE_ENV === "production"
+    ? await buildProductionFrontend()
+    : { "/*": index };
+
 const server = serve<SocketData>({
   port: Number.isFinite(PORT) ? PORT : 3000,
   hostname: HOSTNAME,
@@ -651,10 +663,11 @@ const server = serve<SocketData>({
         "image/png",
         IMMUTABLE_CACHE_CONTROL,
       ),
-    "/*": index,
+    ...frontendRoutes,
   },
 
   websocket: {
+    maxPayloadLength: 64 * 1024,
     data: {} as SocketData,
     open(ws) {
       const session = sessions.get(ws.data.sessionId);
@@ -728,6 +741,44 @@ const server = serve<SocketData>({
         if (activeScreenShareUserId === session.id && nextParticipant.isAfk) {
           activeScreenShareUserId = null;
           broadcastScreenShareState();
+        }
+        return;
+      }
+
+      if (event.type === "whiteboard:subscribe") {
+        if (!ws.data.whiteboardSubscribed) {
+          ws.data.whiteboardSubscribed = true;
+          ws.subscribe(WHITEBOARD_TOPIC);
+          ws.send(JSON.stringify({
+            type: "whiteboard:snapshot",
+            snapshot: whiteboard.snapshot(),
+          } satisfies ServerEvent));
+        }
+        return;
+      }
+
+      if (event.type === "whiteboard:unsubscribe") {
+        ws.data.whiteboardSubscribed = false;
+        ws.unsubscribe(WHITEBOARD_TOPIC);
+        return;
+      }
+
+      if (event.type === "whiteboard:command") {
+        const result = !ws.data.whiteboardSubscribed
+          ? { error: "Open the whiteboard before drawing." }
+          : participant.isAfk
+            ? { error: "Return from AFK to draw on the whiteboard." }
+            : whiteboard.apply(session.id, event.command);
+        if (result && "update" in result) {
+          server.publish(WHITEBOARD_TOPIC, JSON.stringify({
+            type: "whiteboard:update",
+            update: result.update,
+          } satisfies ServerEvent));
+        } else if (result && "error" in result) {
+          ws.send(JSON.stringify({
+            type: "whiteboard:error",
+            message: result.error,
+          } satisfies ServerEvent));
         }
         return;
       }

@@ -1,3 +1,5 @@
+import type { BoardCommand, BoardSnapshot, BoardUpdate } from "./whiteboard";
+
 export interface IceServerConfig {
   urls: string | string[];
   username?: string;
@@ -56,6 +58,9 @@ export type WebRtcSignal =
     };
 
 export type ClientEvent =
+  | { type: "whiteboard:subscribe" }
+  | { type: "whiteboard:unsubscribe" }
+  | { type: "whiteboard:command"; command: BoardCommand }
   | {
       type: "presence:update";
       isMuted: boolean;
@@ -77,6 +82,9 @@ export type ClientEvent =
     };
 
 export type ServerEvent =
+  | { type: "whiteboard:snapshot"; snapshot: BoardSnapshot }
+  | { type: "whiteboard:update"; update: BoardUpdate }
+  | { type: "whiteboard:error"; message: string }
   | {
       type: "room:snapshot";
       selfUserId: string;

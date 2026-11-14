@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useWhiteboard } from "@/hooks/use-whiteboard";
 import { appConfig } from "@/lib/config";
 import {
   cameraVideoConstraints,
@@ -258,6 +259,7 @@ function buildAudioDeviceOptions(
 }
 
 export function useVoiceRoom() {
+  const whiteboard = useWhiteboard(sendEvent);
   const initialScreenShareStatus = getInitialScreenShareStatus();
   const initialSpeakerSelectionSupported = supportsSpeakerSelection();
   const [users, setUsers] = useState<RoomUser[]>([]);
@@ -386,10 +388,14 @@ export function useVoiceRoom() {
   function sendEvent(event: ClientEvent) {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return;
+      return false;
     }
 
+    if (event.type === "whiteboard:command" && ws.bufferedAmount > 64 * 1024) {
+      return false;
+    }
     ws.send(JSON.stringify(event));
+    return true;
   }
 
   function sendSignal(
@@ -1553,7 +1559,20 @@ export function useVoiceRoom() {
   }
 
   async function handleServerEvent(event: ServerEvent) {
+    if (event.type === "whiteboard:snapshot") {
+      whiteboard.receiveSnapshot(event.snapshot);
+      return;
+    }
+    if (event.type === "whiteboard:update") {
+      whiteboard.receiveUpdate(event.update);
+      return;
+    }
+    if (event.type === "whiteboard:error") {
+      whiteboard.setError(event.message);
+      return;
+    }
     if (event.type === "room:snapshot") {
+      whiteboard.reconnect();
       selfUserIdRef.current = event.selfUserId;
       rtcConfigurationRef.current = event.rtcConfiguration as RTCConfiguration;
       hasTurnRelayRef.current = hasTurnRelay(rtcConfigurationRef.current);
@@ -1604,8 +1623,12 @@ export function useVoiceRoom() {
       updateUser(event.user);
       if (previousUser?.isAfk !== event.user.isAfk) syncCameraPeers();
 
-      if (previousUser && !previousUser.isAfk && event.user.isAfk) {
-        playNotificationCue("afk");
+      if (
+        previousUser &&
+        event.user.id !== selfUserIdRef.current &&
+        previousUser.isAfk !== event.user.isAfk
+      ) {
+        playNotificationCue(event.user.isAfk ? "afk" : "afk-return");
       }
 
       if (event.user.id === selfUserIdRef.current) {
@@ -1711,6 +1734,7 @@ export function useVoiceRoom() {
   }
 
   function resetRealtimeState() {
+    whiteboard.reset();
     stopCamera({ notifyServer: false });
     cleanupAllAudioPeers();
 
@@ -2039,9 +2063,7 @@ export function useVoiceRoom() {
       await restoreMutedStateAfterResumeFailure(cause);
     }
 
-    if (nextAfk) {
-      playNotificationCue("afk");
-    }
+    playNotificationCue(nextAfk ? "afk" : "afk-return");
 
     if (nextAfk) {
       speakingRef.current = false;
@@ -2193,6 +2215,7 @@ export function useVoiceRoom() {
   }
 
   return {
+    whiteboard,
     users,
     selfUserId: selfUserIdRef.current,
     isMuted,

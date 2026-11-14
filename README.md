@@ -64,7 +64,10 @@ Compose reads local environment variables and wires the service to port `3000` b
 - Local RNNoise-based microphone denoising with automatic browser fallback
 - Single-presenter screen sharing with automatic takeover when another user starts presenting
 - Inline screen stage for local preview and remote viewing
+- Expanded screen-share stage with optional browser fullscreen
 - Optional cameras with inline participant video and a mirrored local preview
+- Temporary collaborative whiteboard with pen, colors, stroke widths, eraser, undo-own-stroke, and shared clear
+- Distinct room notification sounds when participants go AFK and return
 - Bun-native room session API and WebSocket signaling
 - Browser-to-browser audio transport over WebRTC
 - Clean disconnect flow to return to the intro screen
@@ -90,6 +93,7 @@ Compose reads local environment variables and wires the service to port `3000` b
 - **Audio**: WebRTC peer mesh between connected browsers
 - **Camera**: A video transceiver bundled into each existing audio connection
 - **Screen Share**: Server-authoritative single presenter over a separate WebRTC video mesh channel
+- **Whiteboard**: Server-ordered drawing commands over an opt-in WebSocket topic
 
 WebSockets handle room state, presenter ownership, and WebRTC offer/answer/ICE exchange. Audio, camera video, and screen video do not flow through the Bun server (TURN may relay media when a direct connection is unavailable).
 
@@ -98,6 +102,19 @@ Only one user can present at a time. If another user starts screen sharing, the 
 Microphone access requires a secure context in the browser. Use HTTPS in deployed environments, or `localhost` during development.
 When the browser supports AudioWorklet, Nexus denoises the outgoing mic stream locally before it is sent to peers. If RNNoise cannot start or the browser lacks support, Nexus falls back to browser DSP/pass-through without breaking the call.
 Screen sharing is optimized for desktop Chromium browsers in the current small-room peer-mesh architecture.
+The screen stage expands with the viewport; its fullscreen control changes only the local layout and does not restart capture or increase stream resolution or frame rate.
+
+### Shared whiteboard
+
+Open the board with its room control or **Ctrl+B**. Everyone can draw with a mouse, pen, or touch. Pen colors and stroke widths apply to new strokes. The eraser can remove ink from any participant; **Undo mine** reverses only your own latest stroke, including erasing. Clearing the entire board asks for confirmation and affects everyone.
+
+The board is temporary: its history stays available to late joiners and reconnecting participants while the room remains occupied, and clears when the last participant leaves or the service restarts. Each person chooses whether to view it; opening the board does not interrupt another person's screen share or camera. AFK participants can view the board but must return to draw.
+
+Nexus sends integer point batches at most every 50 ms while drawing, plus stroke start/end messages. It sends no canvas images, video, idle animation frames, or cursor broadcasts. Closed boards unsubscribe from updates and fetch the current snapshot when reopened. The server validates ownership, coordinates, colors, widths, and batch size, rate-limits each writer, and retains at most 512 strokes / 16,384 points (2,048 per stroke). A full board asks users to undo or clear instead of silently deleting drawings.
+
+Production builds split the whiteboard UI into a chunk fetched only on first open. The production server builds frontend assets once in memory at startup with `Bun.build`; development keeps Bun's HTML/HMR flow. A failed whiteboard download leaves voice controls and audio running.
+
+Run the focused server state tests with `bun run test:unit`. End-to-end coverage runs against production mode through `bun run test:e2e`.
 
 ### Lightweight cameras
 

@@ -1,6 +1,7 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { appConfig } from "../src/lib/config";
 import type { NotificationCue } from "../src/lib/audio/notification-sounds";
+import type { BoardSnapshot, BoardUpdate } from "../src/lib/whiteboard";
 
 interface CameraHarness {
   requests: number;
@@ -15,7 +16,95 @@ declare global {
   interface Window {
     __nexusCamera: CameraHarness;
     __nexusPeerConnections: RTCPeerConnection[];
+    __nexusBoard: {
+      snapshot: BoardSnapshot | null;
+      updates: BoardUpdate[];
+      sent: Array<{ message: Record<string, any>; bytes: number; time: number }>;
+    };
   }
+}
+
+function installWhiteboardTracker() {
+  const Original = window.WebSocket;
+  const state: Window["__nexusBoard"] = {
+    snapshot: null,
+    updates: [],
+    sent: [],
+  };
+  window.__nexusBoard = state;
+  window.WebSocket = class extends Original {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols);
+      this.addEventListener("message", (event) => {
+        if (!this.url.includes("/api/ws") || typeof event.data !== "string")
+          return;
+        const message = JSON.parse(event.data);
+        if (message.type === "whiteboard:snapshot")
+          state.snapshot = message.snapshot;
+        if (message.type === "whiteboard:update")
+          state.updates.push(message.update);
+      });
+    }
+    override send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+      if (this.url.includes("/api/ws") && typeof data === "string") {
+        const message = JSON.parse(data);
+        if (message.type === "whiteboard:command")
+          state.sent.push({
+            message,
+            bytes: new TextEncoder().encode(data).length,
+            time: performance.now(),
+          });
+      }
+      super.send(data);
+    }
+  };
+}
+
+async function openWhiteboard(page: Page) {
+  await page
+    .getByRole("button", { name: "Open whiteboard", exact: true })
+    .click();
+  await expect(page.getByLabel("Use pen", { exact: true })).toBeEnabled();
+}
+
+async function drawBoardLine(
+  page: Page,
+  from: [number, number],
+  to: [number, number],
+  steps = 20,
+) {
+  const rect = await page
+    .getByLabel("Collaborative whiteboard", { exact: true })
+    .boundingBox();
+  if (!rect) throw new Error("Whiteboard is missing");
+  await page.mouse.move(
+    rect.x + rect.width * from[0],
+    rect.y + rect.height * from[1],
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    rect.x + rect.width * to[0],
+    rect.y + rect.height * to[1],
+    { steps },
+  );
+  await page.mouse.up();
+}
+
+async function boardPixel(page: Page, x: number, y: number) {
+  return page.getByLabel("Collaborative whiteboard", { exact: true }).evaluate(
+    (element: HTMLCanvasElement, point) => {
+      const context = element.getContext("2d")!;
+      return [
+        ...context.getImageData(
+          Math.floor(element.width * point.x),
+          Math.floor(element.height * point.y),
+          1,
+          1,
+        ).data,
+      ];
+    },
+    { x, y },
+  );
 }
 
 function installCameraHarness() {
@@ -1316,6 +1405,412 @@ test("camera coexists with screen sharing and stops when the device ends capture
   }
 });
 
+test("whiteboard syncs pen, colors, eraser and undo-own-stroke between participants", async ({
+  browser,
+}) => {
+  const contexts = await Promise.all([
+    createVoiceContext(browser),
+    createVoiceContext(browser),
+  ]);
+  try {
+    const alice = await contexts[0]!.newPage();
+    const bob = await contexts[1]!.newPage();
+    await login(alice, "Alice");
+    await login(bob, "Bob");
+    await openWhiteboard(alice);
+    await openWhiteboard(bob);
+    await drawBoardLine(alice, [0.1, 0.5], [0.9, 0.5]);
+    await expect
+      .poll(() => boardPixel(bob, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await bob.getByRole("button", { name: "Cyan pen", exact: true }).click();
+    await drawBoardLine(bob, [0.5, 0.2], [0.5, 0.8]);
+    await expect
+      .poll(() => boardPixel(alice, 0.5, 0.5))
+      .toEqual([34, 211, 238, 255]);
+    await bob
+      .getByRole("button", { name: "Undo my last stroke", exact: true })
+      .click();
+    await expect
+      .poll(() => boardPixel(alice, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await expect(
+      bob.getByRole("button", { name: "Undo my last stroke", exact: true }),
+    ).toBeDisabled();
+    await bob.getByRole("button", { name: "Use eraser", exact: true }).click();
+    await drawBoardLine(bob, [0.5, 0.2], [0.5, 0.8]);
+    await expect
+      .poll(async () => (await boardPixel(alice, 0.5, 0.5))[3])
+      .toBe(0);
+    await bob
+      .getByRole("button", { name: "Undo my last stroke", exact: true })
+      .click();
+    await expect
+      .poll(() => boardPixel(bob, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await expectRemoteAudioPlaying(alice);
+    await expectRemoteAudioPlaying(bob);
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()));
+  }
+});
+
+test("whiteboard sends bounded point batches and renders history for a late joiner", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installWhiteboardTracker,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installWhiteboardTracker,
+  ]);
+  try {
+    const alice = await aliceContext.newPage();
+    await login(alice, "Alice");
+    await openWhiteboard(alice);
+    await drawBoardLine(alice, [0.1, 0.5], [0.9, 0.5], 40);
+    await expect(alice.getByText("1 stroke", { exact: true })).toBeVisible();
+    const sent = await alice.evaluate(() => window.__nexusBoard.sent);
+    const batches = sent.filter(
+      (entry) => entry.message.command.type === "append",
+    );
+    expect(sent.reduce((sum, entry) => sum + entry.bytes, 0)).toBeLessThan(
+      6000,
+    );
+    expect(
+      batches.every((entry) => entry.message.command.points.length <= 32),
+    ).toBe(true);
+    const intermediate = batches.filter((entry) => !entry.message.command.done);
+    for (let i = 1; i < intermediate.length; i++)
+      expect(
+        intermediate[i]!.time - intermediate[i - 1]!.time,
+      ).toBeGreaterThanOrEqual(35);
+    const bob = await bobContext.newPage();
+    await login(bob, "Bob");
+    expect(await bob.evaluate(() => window.__nexusBoard.snapshot)).toBeNull();
+    expect(await bob.evaluate(() => window.__nexusBoard.updates.length)).toBe(
+      0,
+    );
+    await openWhiteboard(bob);
+    await expect
+      .poll(() => boardPixel(bob, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await bob.getByTestId("room-control-whiteboard").click();
+    const updatesWhileClosing = await bob.evaluate(async () => {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+      return window.__nexusBoard.updates.length;
+    });
+    await drawBoardLine(alice, [0.1, 0.7], [0.9, 0.7]);
+    await expect(alice.getByText("2 strokes", { exact: true })).toBeVisible();
+    expect(await bob.evaluate(() => window.__nexusBoard.updates.length)).toBe(
+      updatesWhileClosing,
+    );
+    await openWhiteboard(bob);
+    await expect
+      .poll(() => boardPixel(bob, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await expect(bob.getByText("2 strokes", { exact: true })).toBeVisible();
+  } finally {
+    await aliceContext.close();
+    await bobContext.close();
+  }
+});
+
+test("whiteboard UI code is downloaded only when opened", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser);
+  try {
+    const page = await context.newPage();
+    const scripts: string[] = [];
+    page.on("response", async (response) => {
+      if (new URL(response.url()).pathname.endsWith(".js"))
+        scripts.push(await response.text());
+    });
+    await login(page, "Alice");
+    expect(scripts.some((source) => source.includes("Shared whiteboard"))).toBe(
+      false,
+    );
+    await openWhiteboard(page);
+    await expect
+      .poll(() =>
+        scripts.some((source) => source.includes("Shared whiteboard")),
+      )
+      .toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("whiteboard download failure leaves voice controls and audio running", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser);
+  const bobContext = await createVoiceContext(browser);
+  try {
+    const alice = await aliceContext.newPage();
+    const bob = await bobContext.newPage();
+    await alice.route("**/*.js", async (route) => {
+      const response = await route.fetch();
+      const source = await response.text();
+      if (source.includes("Shared whiteboard")) await route.abort();
+      else await route.fulfill({ response });
+    });
+    await login(alice, "Alice");
+    await login(bob, "Bob");
+    await expectRemoteAudioPlaying(alice);
+    await alice
+      .getByRole("button", { name: "Open whiteboard", exact: true })
+      .click();
+    await expect(alice.getByRole("alert")).toContainText(
+      "The whiteboard could not load",
+    );
+    await alice
+      .getByRole("button", { name: "Close whiteboard", exact: true })
+      .click();
+    await alice
+      .getByRole("button", { name: "Mute microphone", exact: true })
+      .click();
+    await expect(
+      alice.getByRole("button", { name: "Unmute microphone", exact: true }),
+    ).toBeVisible();
+    await expectRemoteAudioPlaying(alice);
+  } finally {
+    await aliceContext.close();
+    await bobContext.close();
+  }
+});
+
+test("whiteboard clear is shared and an empty room starts with a clean board", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser);
+  const bobContext = await createVoiceContext(browser);
+  const carolContext = await createVoiceContext(browser);
+  try {
+    const alice = await aliceContext.newPage();
+    const bob = await bobContext.newPage();
+    await login(alice, "Alice");
+    await login(bob, "Bob");
+    await openWhiteboard(alice);
+    await openWhiteboard(bob);
+    await drawBoardLine(alice, [0.1, 0.5], [0.9, 0.5]);
+    await expect
+      .poll(() => boardPixel(bob, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await bob.getByRole("button", { name: "Clear board", exact: true }).click();
+    await bob.getByRole("button", { name: "Cancel", exact: true }).click();
+    expect((await boardPixel(alice, 0.5, 0.5))[3]).toBe(255);
+    await bob.getByRole("button", { name: "Clear board", exact: true }).click();
+    await bob
+      .getByRole("button", { name: "Confirm clear whiteboard", exact: true })
+      .click();
+    await expect
+      .poll(async () => (await boardPixel(alice, 0.5, 0.5))[3])
+      .toBe(0);
+    await expect(bob.getByText("0 strokes", { exact: true })).toBeVisible();
+    await drawBoardLine(alice, [0.1, 0.5], [0.9, 0.5]);
+    await expect
+      .poll(() => boardPixel(bob, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await alice
+      .getByRole("button", { name: "Disconnect", exact: true })
+      .click();
+    await bob.getByRole("button", { name: "Disconnect", exact: true }).click();
+    const carol = await carolContext.newPage();
+    await login(carol, "Carol");
+    await openWhiteboard(carol);
+    await expect(carol.getByText("0 strokes", { exact: true })).toBeVisible();
+    expect((await boardPixel(carol, 0.5, 0.5))[3]).toBe(0);
+  } finally {
+    await Promise.all([
+      aliceContext.close(),
+      bobContext.close(),
+      carolContext.close(),
+    ]);
+  }
+});
+
+test("whiteboard restores a room snapshot after reconnect and rejects drawing while AFK", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installWebSocketTracker,
+    installWhiteboardTracker,
+  ]);
+  const bobContext = await createVoiceContext(browser);
+  try {
+    const alice = await aliceContext.newPage();
+    const bob = await bobContext.newPage();
+    await login(alice, "Alice");
+    await login(bob, "Bob");
+    await openWhiteboard(alice);
+    await openWhiteboard(bob);
+    await drawBoardLine(alice, [0.1, 0.5], [0.9, 0.5]);
+    await expect
+      .poll(() => boardPixel(bob, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await alice.evaluate(() => {
+      const sockets = (window as Window & { __nexusSockets?: WebSocket[] })
+        .__nexusSockets!;
+      sockets
+        .find(
+          (socket) =>
+            socket.url.includes("/api/ws") &&
+            socket.readyState === WebSocket.OPEN,
+        )!
+        .close(4005, "Simulated drop");
+    });
+    await expect(alice.getByText(/realtime connection lost/i)).toBeVisible();
+    await expect(
+      alice.getByRole("button", { name: "Use pen", exact: true }),
+    ).toBeEnabled();
+    await expect
+      .poll(() => boardPixel(alice, 0.5, 0.5))
+      .toEqual([0, 255, 65, 255]);
+    await alice.getByRole("button", { name: "Go AFK", exact: true }).click();
+    await expect(
+      alice.getByRole("button", { name: "Use pen", exact: true }),
+    ).toBeDisabled();
+    await alice.evaluate(() => {
+      const sockets = (window as Window & { __nexusSockets?: WebSocket[] })
+        .__nexusSockets!;
+      const socket = sockets.find(
+        (candidate) =>
+          candidate.url.includes("/api/ws") &&
+          candidate.readyState === WebSocket.OPEN,
+      )!;
+      socket.send(
+        JSON.stringify({
+          type: "whiteboard:command",
+          command: {
+            type: "clear",
+            epoch: window.__nexusBoard.snapshot!.epoch,
+          },
+        }),
+      );
+    });
+    await expect(
+      alice.getByText("Return from AFK to draw on the whiteboard.", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    expect((await boardPixel(bob, 0.5, 0.5))[3]).toBe(255);
+  } finally {
+    await aliceContext.close();
+    await bobContext.close();
+  }
+});
+
+test("whiteboard accepts touch input with the same coordinates as desktop viewers", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    permissions: ["microphone"],
+    hasTouch: true,
+    viewport: { width: 390, height: 844 },
+  });
+  try {
+    const page = await context.newPage();
+    await login(page, "Touch");
+    await openWhiteboard(page);
+    const rect = await page
+      .getByLabel("Collaborative whiteboard", { exact: true })
+      .boundingBox();
+    if (!rect) throw new Error("Missing board");
+    await page.touchscreen.tap(
+      rect.x + rect.width / 2,
+      rect.y + rect.height / 2,
+    );
+    await expect
+      .poll(async () => (await boardPixel(page, 0.5, 0.5))[3])
+      .toBeGreaterThan(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test("screen share expands with the viewport and enters and exits fullscreen without recapturing", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser, [installScreenShareMocks]);
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await login(page, "Alice");
+    await clickScreenShare(page);
+    await expectScreenStageVideo(page, "Alice");
+    const stage = await page.getByTestId("screen-stage").boundingBox();
+    const video = await page.getByTestId("screen-share-video").boundingBox();
+    expect(stage!.width).toBeGreaterThan(1400);
+    expect(video!.height).toBeGreaterThan(700);
+    await page
+      .getByRole("button", {
+        name: "Enter screen share fullscreen",
+        exact: true,
+      })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          document.fullscreenElement?.getAttribute("data-testid"),
+        ),
+      )
+      .toBe("screen-stage");
+    await page
+      .getByRole("button", {
+        name: "Exit screen share fullscreen",
+        exact: true,
+      })
+      .click();
+    await expect
+      .poll(() => page.evaluate(() => document.fullscreenElement === null))
+      .toBe(true);
+    await expectLocalScreenTrackState(page, "live");
+    expect(
+      await page.evaluate(
+        () =>
+          (window as Window & { __nexusScreenShare?: { starts: number } })
+            .__nexusScreenShare?.starts,
+      ),
+    ).toBe(1);
+  } finally {
+    await context.close();
+  }
+});
+
+test("screen share remains usable when fullscreen is refused", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser, [
+    installScreenShareMocks,
+    () => {
+      Element.prototype.requestFullscreen = () =>
+        Promise.reject(new DOMException("Blocked", "NotAllowedError"));
+    },
+  ]);
+  try {
+    const page = await context.newPage();
+    await login(page, "Alice");
+    await clickScreenShare(page);
+    await page
+      .getByRole("button", {
+        name: "Enter screen share fullscreen",
+        exact: true,
+      })
+      .click();
+    await expect(page.getByRole("alert")).toContainText(
+      "Fullscreen is unavailable",
+    );
+    await expectScreenStageVideo(page, "Alice");
+    await expectLocalScreenTrackState(page, "live");
+  } finally {
+    await context.close();
+  }
+});
+
 test("skips the dedicated intro after the first visit", async ({ browser }) => {
   const context = await createVoiceContext(browser);
   const page = await context.newPage();
@@ -1954,7 +2449,7 @@ test("notification sounds stay local for mute and unmute", async ({
   await bobContext.close();
 });
 
-test("notification sounds cover AFK for local and remote clients", async ({
+test("notification sounds cover AFK and return for local and remote clients", async ({
   browser,
 }) => {
   const aliceContext = await createVoiceContext(browser, [
@@ -1980,8 +2475,12 @@ test("notification sounds cover AFK for local and remote clients", async ({
   await expectNotificationSoundLog(bobPage, ["afk"]);
 
   await clickAfk(alicePage);
-  await expectNotificationSoundLog(alicePage, ["afk"]);
-  await expectNotificationSoundLog(bobPage, ["afk"]);
+  await expectNotificationSoundLog(alicePage, ["afk", "afk-return"]);
+  await expectNotificationSoundLog(bobPage, ["afk", "afk-return"]);
+
+  await alicePage.getByRole("button", { name: "Mute microphone", exact: true }).click();
+  await expectNotificationSoundLog(alicePage, ["afk", "afk-return", "mute"]);
+  await expectNotificationSoundLog(bobPage, ["afk", "afk-return"]);
 
   await aliceContext.close();
   await bobContext.close();
