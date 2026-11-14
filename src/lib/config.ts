@@ -89,7 +89,7 @@ type Config = {
   version: `${number}.${number}.${number}`;
 };
 
-const appVersion = "1.7.0" as const;
+const appVersion = "1.7.1" as const;
 
 export const appConfig = {
   appName: "NEXUS",
@@ -98,7 +98,7 @@ export const appConfig = {
   creatorGithubUrl: "https://github.com/xcodebeast",
   creatorWebsite: "https://codebeast.io",
   introAnimation: {
-    firstVisitDurationMs: 4200,
+    firstVisitDurationMs: 1200,
     idleOpacity: 0.15,
     seenStorageKey: "nexus-intro-seen",
   },

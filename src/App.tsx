@@ -9,6 +9,7 @@ import { useNetworkStatus } from "@/hooks/use-network-status";
 import { createSession, deleteSession, getSession } from "@/lib/api";
 import { appConfig } from "@/lib/config";
 import { offlineConnectMessage } from "@/lib/pwa";
+import { GithubIcon } from "lucide-react";
 
 type AppState = "intro" | "connect" | "room";
 
@@ -26,7 +27,8 @@ function hasSeenIntro() {
 
   try {
     return (
-      window.localStorage.getItem(appConfig.introAnimation.seenStorageKey) === "true"
+      window.localStorage.getItem(appConfig.introAnimation.seenStorageKey) ===
+      "true"
     );
   } catch {
     return false;
@@ -39,7 +41,10 @@ function markIntroAsSeen() {
   }
 
   try {
-    window.localStorage.setItem(appConfig.introAnimation.seenStorageKey, "true");
+    window.localStorage.setItem(
+      appConfig.introAnimation.seenStorageKey,
+      "true",
+    );
   } catch {
     return;
   }
@@ -68,7 +73,10 @@ export function App() {
           return;
         }
 
-        localStorage.setItem(appConfig.storage.usernameKey, session.user.username);
+        localStorage.setItem(
+          appConfig.storage.usernameKey,
+          session.user.username,
+        );
         setSavedUsername(session.user.username);
         setCurrentUser(session.user.username);
       })
@@ -137,26 +145,40 @@ export function App() {
       {appState === "connect" && (
         <div className="absolute inset-0 flex items-center justify-center z-10">
           <div className="text-center">
-            <h1 
-              className="text-4xl sm:text-6xl font-mono font-bold text-primary tracking-[0.3em] mb-8 animate-in fade-in slide-in-from-top-4 duration-700 drop-shadow-[0_0_15px_rgba(0,255,65,0.6)]"
-            >
-             {appConfig.appName} 
+            <h1 className="text-4xl sm:text-6xl font-mono font-bold text-primary tracking-[0.3em] mb-8 animate-in fade-in slide-in-from-top-4 duration-300 drop-shadow-[0_0_15px_rgba(0,255,65,0.6)]">
+              {appConfig.appName}
             </h1>
-            <Button
-              onClick={handleConnect}
-              disabled={isOffline}
-              className="
+            <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
+              <Button
+                onClick={handleConnect}
+                disabled={isOffline}
+                className="
                 px-8 py-6 text-lg font-mono uppercase tracking-widest
                 bg-transparent border-2 border-primary text-primary
                 hover:bg-primary hover:text-primary-foreground
                 transition-all duration-500
                 shadow-[0_0_20px_rgba(0,255,65,0.3)]
                 hover:shadow-[0_0_40px_rgba(0,255,65,0.6)]
-                animate-in fade-in zoom-in-95
+                animate-in fade-in zoom-in-95 duration-200
               "
-            >
-              {">"} Connect
-            </Button>
+              >
+                {">"} Connect
+              </Button>
+              <Button
+                asChild
+                variant="outline"
+                className="border-primary/40 bg-transparent px-6 py-6 font-mono uppercase tracking-wider text-primary/80 hover:border-primary hover:bg-primary/10"
+              >
+                <a
+                  href={appConfig.githubUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <GithubIcon />
+                  View repository
+                </a>
+              </Button>
+            </div>
             {isOffline && (
               <p
                 className="mt-6 max-w-sm text-xs font-mono text-amber-300 animate-in fade-in duration-700"
@@ -165,7 +187,7 @@ export function App() {
                 {offlineConnectMessage}
               </p>
             )}
-            <p className="mt-6 text-xs font-mono text-muted-foreground animate-in fade-in duration-1000 delay-500">
+            <p className="mt-6 text-xs font-mono text-muted-foreground animate-in fade-in duration-300 delay-150">
               Voice communication channel
             </p>
           </div>
@@ -190,10 +212,11 @@ export function App() {
         savedUsername={savedUsername}
       />
 
-      <div 
+      <div
         className="fixed inset-0 pointer-events-none z-20 opacity-[0.03]"
         style={{
-          background: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 255, 65, 0.1) 2px, rgba(0, 255, 65, 0.1) 4px)",
+          background:
+            "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 255, 65, 0.1) 2px, rgba(0, 255, 65, 0.1) 4px)",
         }}
       />
     </main>

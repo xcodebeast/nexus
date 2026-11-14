@@ -1831,7 +1831,10 @@ test("skips the dedicated intro after the first visit", async ({ browser }) => {
   const repeatVisitDurationMs = await measureConnectScreenAppearance(page);
 
   await expect(page.getByText(/^NEXUS$/)).toHaveCount(1);
-  expect(firstVisitDurationMs).toBeGreaterThan(3_000);
+  expect(firstVisitDurationMs).toBeGreaterThanOrEqual(
+    appConfig.introAnimation.firstVisitDurationMs - 100,
+  );
+  expect(firstVisitDurationMs).toBeLessThan(2_000);
   expect(repeatVisitDurationMs).toBeLessThan(1_500);
 
   await context.close();
