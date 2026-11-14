@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { appConfig } from "@/lib/config";
+import {
+  cameraVideoConstraints,
+  getCameraEncoding,
+  getCameraErrorMessage,
+} from "@/lib/camera";
 import type {
   ClientEvent,
   RoomUser,
@@ -166,6 +171,7 @@ interface PresenceState {
   isMuted: boolean;
   isSpeaking: boolean;
   isAfk: boolean;
+  isCameraOn: boolean;
 }
 
 function supportsSpeakerSelection() {
@@ -257,6 +263,13 @@ export function useVoiceRoom() {
   const [users, setUsers] = useState<RoomUser[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [isAfk, setIsAfk] = useState(false);
+  const [localCameraStream, setLocalCameraStream] =
+    useState<MediaStream | null>(null);
+  const [remoteCameraStreams, setRemoteCameraStreams] = useState(
+    new Map<string, MediaStream>(),
+  );
+  const [isCameraRequesting, setIsCameraRequesting] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const [connectionState, setConnectionState] =
     useState<ConnectionState>(ConnectionState.RequestingMedia);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -302,6 +315,12 @@ export function useVoiceRoom() {
   const selfUserIdRef = useRef<string | null>(null);
   const usersRef = useRef<RoomUser[]>([]);
   const localAudioRef = useRef<PreparedLocalAudio | null>(null);
+  const localCameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraRequestRef = useRef(0);
+  const cameraRequestingRef = useRef(false);
+  const cameraUpdatesRef = useRef(
+    new WeakMap<RTCPeerConnection, Promise<void>>(),
+  );
   const localScreenStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const screenPeerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
@@ -341,11 +360,7 @@ export function useVoiceRoom() {
   }
 
   function setUsersWithUpdater(updater: (users: RoomUser[]) => RoomUser[]) {
-    setUsers((previousUsers) => {
-      const nextUsers = updater(previousUsers);
-      usersRef.current = nextUsers;
-      return nextUsers;
-    });
+    setUsersState(updater(usersRef.current));
   }
 
   function setScreenShareStatusState(nextStatus: ScreenShareStatus) {
@@ -440,10 +455,14 @@ export function useVoiceRoom() {
       isMuted,
       isSpeaking,
       isAfk,
+      isCameraOn: !isAfk && Boolean(localCameraStreamRef.current),
     };
   }
 
-  function syncPresence(nextPresence: PresenceState) {
+  function syncPresence(
+    nextPresence: PresenceState,
+    options: { notifyServer?: boolean } = {},
+  ) {
     const presence = createPresenceState(nextPresence);
     const selfUserId = selfUserIdRef.current;
     if (selfUserId) {
@@ -455,18 +474,22 @@ export function useVoiceRoom() {
                 isAfk: presence.isAfk,
                 isMuted: presence.isMuted,
                 isSpeaking: presence.isSpeaking,
+                isCameraOn: presence.isCameraOn,
               }
             : user,
         ),
       );
     }
 
-    sendEvent({
-      type: "presence:update",
-      isMuted: presence.isMuted,
-      isSpeaking: presence.isSpeaking,
-      isAfk: presence.isAfk,
-    });
+    if (options.notifyServer ?? true) {
+      sendEvent({
+        type: "presence:update",
+        isMuted: presence.isMuted,
+        isSpeaking: presence.isSpeaking,
+        isAfk: presence.isAfk,
+        isCameraOn: presence.isCameraOn,
+      });
+    }
   }
 
   async function setEffectiveMutedState(nextMuted: boolean) {
@@ -822,10 +845,146 @@ export function useVoiceRoom() {
     void tryPlayRemoteAudio(peerId, audio);
   }
 
+  function getCameraViewerCount() {
+    return usersRef.current.filter(
+      (user) => user.id !== selfUserIdRef.current && !user.isAfk,
+    ).length;
+  }
+
+  /** Serialize sender changes so toggles and room changes cannot race setParameters. */
+  function syncPeerCamera(peer: RTCPeerConnection) {
+    const previousUpdate =
+      cameraUpdatesRef.current.get(peer) ?? Promise.resolve();
+    const update = previousUpdate
+      .then(async () => {
+        if (peer.signalingState !== "stable" || peer.connectionState === "closed")
+          return;
+        const transceiver = peer
+          .getTransceivers()
+          .find((entry) => entry.receiver.track.kind === "video");
+        if (!transceiver) return;
+
+        const sender = transceiver.sender;
+        const track = localCameraStreamRef.current?.getVideoTracks()[0] ?? null;
+        if (!track) {
+          await sender.replaceTrack(null);
+          return;
+        }
+
+        // Apply the cap before attaching live video, including on the answering side.
+        const parameters = sender.getParameters();
+        if (!parameters.encodings?.length) return;
+        const encoding = getCameraEncoding(getCameraViewerCount());
+        for (const entry of parameters.encodings) Object.assign(entry, encoding);
+        parameters.degradationPreference = "balanced";
+        await sender.setParameters(parameters);
+        // Stop/AFK may have happened while the browser was configuring the encoder.
+        const currentTrack =
+          localCameraStreamRef.current?.getVideoTracks()[0] ?? null;
+        await sender.replaceTrack(currentTrack);
+      })
+      .catch(async () => {
+        if (peer.connectionState === "closed") return;
+        const sender = peer
+          .getTransceivers()
+          .find((entry) => entry.receiver.track.kind === "video")?.sender;
+        await sender?.replaceTrack(null).catch(() => {});
+        if (localCameraStreamRef.current) {
+          setCameraError(
+            "Camera connection could not be configured. Turn the camera off and try again.",
+          );
+        }
+      });
+    cameraUpdatesRef.current.set(peer, update);
+    return update;
+  }
+
+  function syncCameraPeers() {
+    for (const peer of peerConnectionsRef.current.values())
+      void syncPeerCamera(peer);
+  }
+
+  function stopCamera(options: { notifyServer?: boolean } = {}) {
+    cameraRequestRef.current += 1;
+    cameraRequestingRef.current = false;
+    setIsCameraRequesting(false);
+    const stream = localCameraStreamRef.current;
+    localCameraStreamRef.current = null;
+    for (const track of stream?.getTracks() ?? []) {
+      track.onended = null;
+      track.stop();
+    }
+    setLocalCameraStream(null);
+    setCameraError(null);
+    syncCameraPeers();
+    syncPresence(createPresenceState(), options);
+  }
+
+  async function startCamera() {
+    if (localCameraStreamRef.current || cameraRequestingRef.current) return;
+    if (
+      isAfkRef.current ||
+      manualDisconnectRef.current ||
+      wsRef.current?.readyState !== WebSocket.OPEN
+    )
+      return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError(
+        "Camera access requires HTTPS and a browser with camera support.",
+      );
+      return;
+    }
+
+    const requestId = ++cameraRequestRef.current;
+    cameraRequestingRef.current = true;
+    setIsCameraRequesting(true);
+    setCameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: cameraVideoConstraints,
+      });
+      if (
+        requestId !== cameraRequestRef.current ||
+        isAfkRef.current ||
+        manualDisconnectRef.current ||
+        wsRef.current?.readyState !== WebSocket.OPEN
+      ) {
+        for (const track of stream.getTracks()) track.stop();
+        return;
+      }
+      const track = stream.getVideoTracks()[0];
+      if (!track) {
+        for (const entry of stream.getTracks()) entry.stop();
+        throw new Error("Missing camera track");
+      }
+      track.contentHint = "motion";
+      track.onended = () => stopCamera();
+      localCameraStreamRef.current = stream;
+      setLocalCameraStream(stream);
+      syncCameraPeers();
+      syncPresence(createPresenceState());
+    } catch (cause) {
+      if (requestId === cameraRequestRef.current)
+        setCameraError(getCameraErrorMessage(cause));
+    } finally {
+      if (requestId === cameraRequestRef.current) {
+        cameraRequestingRef.current = false;
+        setIsCameraRequesting(false);
+      }
+    }
+  }
+
   function cleanupAudioPeer(
     peerId: string,
     options: { preserveFailure?: boolean } = {},
   ) {
+    setRemoteCameraStreams((streams) => {
+      if (!streams.has(peerId)) return streams;
+      const nextStreams = new Map(streams);
+      nextStreams.delete(peerId);
+      return nextStreams;
+    });
     const peer = peerConnectionsRef.current.get(peerId);
     if (peer) {
       peer.close();
@@ -895,7 +1054,10 @@ export function useVoiceRoom() {
       return existingPeer;
     }
 
-    const peer = new RTCPeerConnection(rtcConfigurationRef.current);
+    const peer = new RTCPeerConnection({
+      ...rtcConfigurationRef.current,
+      bundlePolicy: "max-bundle",
+    });
     const localAudio = localAudioRef.current;
     if (localAudio) {
       for (const track of localAudio.outboundStream.getAudioTracks()) {
@@ -915,6 +1077,13 @@ export function useVoiceRoom() {
     };
 
     peer.ontrack = (event) => {
+      if (peerConnectionsRef.current.get(peerId) !== peer) return;
+      if (event.track.kind === "video") {
+        setRemoteCameraStreams((streams) =>
+          new Map(streams).set(peerId, new MediaStream([event.track])),
+        );
+        return;
+      }
       if (event.track.kind !== "audio") {
         return;
       }
@@ -988,6 +1157,15 @@ export function useVoiceRoom() {
       return;
     }
 
+    if (!peer.getTransceivers().some(
+      (entry) => entry.receiver.track.kind === "video",
+    )) {
+      peer.addTransceiver("video", {
+        direction: "sendrecv",
+        sendEncodings: [getCameraEncoding(getCameraViewerCount())],
+      });
+    }
+
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
 
@@ -1012,9 +1190,14 @@ export function useVoiceRoom() {
 
     if (signal.type === "offer") {
       await peer.setRemoteDescription(signal.sdp);
+      const cameraTransceiver = peer.getTransceivers().find(
+        (entry) => entry.receiver.track.kind === "video",
+      );
+      if (cameraTransceiver) cameraTransceiver.direction = "sendrecv";
       await flushPendingAudioIceCandidates(fromUserId);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
+      void syncPeerCamera(peer);
 
       if (!peer.localDescription) {
         return;
@@ -1031,6 +1214,7 @@ export function useVoiceRoom() {
       if (peer.signalingState === "have-local-offer") {
         await peer.setRemoteDescription(signal.sdp);
         await flushPendingAudioIceCandidates(fromUserId);
+        void syncPeerCamera(peer);
       }
       return;
     }
@@ -1383,6 +1567,7 @@ export function useVoiceRoom() {
                   isAfk: selfPresence.isAfk,
                   isMuted: selfPresence.isMuted,
                   isSpeaking: selfPresence.isSpeaking,
+                  isCameraOn: selfPresence.isCameraOn,
                 }
               : user,
           ),
@@ -1403,6 +1588,7 @@ export function useVoiceRoom() {
 
     if (event.type === "room:user-joined") {
       updateUser(event.user);
+      syncCameraPeers();
       playNotificationCue("join");
       if (event.user.id !== selfUserIdRef.current) {
         void createAudioOfferForPeer(event.user.id);
@@ -1416,6 +1602,7 @@ export function useVoiceRoom() {
     if (event.type === "room:user-updated") {
       const previousUser = getUser(event.user.id);
       updateUser(event.user);
+      if (previousUser?.isAfk !== event.user.isAfk) syncCameraPeers();
 
       if (previousUser && !previousUser.isAfk && event.user.isAfk) {
         playNotificationCue("afk");
@@ -1450,6 +1637,7 @@ export function useVoiceRoom() {
       cleanupAudioPeer(event.userId);
       cleanupScreenPeer(event.userId);
       removeUser(event.userId);
+      syncCameraPeers();
 
       if (event.userId === activeScreenShareUserIdRef.current) {
         applyActiveScreenShareUpdate(null);
@@ -1523,6 +1711,7 @@ export function useVoiceRoom() {
   }
 
   function resetRealtimeState() {
+    stopCamera({ notifyServer: false });
     cleanupAllAudioPeers();
 
     cleanupAllScreenPeers();
@@ -1836,6 +2025,7 @@ export function useVoiceRoom() {
 
   async function toggleAfk() {
     const nextAfk = !isAfkRef.current;
+    if (nextAfk) stopCamera({ notifyServer: false });
     isAfkRef.current = nextAfk;
     setIsAfk(nextAfk);
     setScreenShareError((previousError) =>
@@ -2007,6 +2197,13 @@ export function useVoiceRoom() {
     selfUserId: selfUserIdRef.current,
     isMuted,
     isAfk,
+    localCameraStream,
+    remoteCameraStreams,
+    isCameraRequesting,
+    cameraError,
+    cameraSupported: Boolean(navigator.mediaDevices?.getUserMedia),
+    startCamera,
+    stopCamera,
     connectionState,
     error: connectionError ?? localCaptureError ?? mediaError,
     audioProcessingMode,

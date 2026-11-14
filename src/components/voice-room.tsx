@@ -1,5 +1,6 @@
 import { type ComponentProps, type ReactNode, useState } from "react";
 import { AudioDeviceSettingsDialog } from "@/components/audio-device-settings-dialog";
+import { CameraTile } from "@/components/camera-tile";
 import { Button } from "@/components/ui/button";
 import { ShortcutKeys } from "@/components/ui/shortcut-keys";
 import {
@@ -30,6 +31,8 @@ import {
   MonitorIcon,
   PowerIcon,
   Settings2Icon,
+  VideoIcon,
+  VideoOffIcon,
 } from "lucide-react";
 import { ScreenStage } from "./screen-stage";
 import { VoiceAvatar } from "./voice-avatar";
@@ -74,6 +77,13 @@ export function VoiceRoom({
     selfUserId,
     isMuted,
     isAfk,
+    localCameraStream,
+    remoteCameraStreams,
+    isCameraRequesting,
+    cameraError,
+    cameraSupported,
+    startCamera,
+    stopCamera,
     connectionState,
     error,
     activeScreenShareUserId,
@@ -111,6 +121,20 @@ export function VoiceRoom({
   const muteDisabled =
     connectionState === ConnectionState.Disconnected || isAfk;
   const afkDisabled = connectionState === ConnectionState.Disconnected;
+  const cameraDisabled =
+    isAfk ||
+    connectionState !== ConnectionState.Connected ||
+    !selfUserId ||
+    !cameraSupported;
+  const cameraButtonLabel = isCameraRequesting
+    ? "Cancel camera request"
+    : localCameraStream
+      ? "Turn camera off"
+      : "Turn camera on";
+  const handleCameraAction = () => {
+    if (localCameraStream || isCameraRequesting) stopCamera();
+    else return startCamera();
+  };
   const activePresenter =
     users.find((user) => user.id === activeScreenShareUserId) ?? null;
   const activePresenterName = activePresenter?.username ?? null;
@@ -155,6 +179,10 @@ export function VoiceRoom({
       afk: {
         disabled: afkDisabled,
         onTrigger: toggleAfk,
+      },
+      camera: {
+        disabled: cameraDisabled,
+        onTrigger: handleCameraAction,
       },
       screenShare: {
         disabled: screenShareDisabled,
@@ -202,6 +230,24 @@ export function VoiceRoom({
       onPress: toggleAfk,
       shortcutKeys: getShortcutDisplayKeys("afk", shortcutPlatform),
       variant: isAfk ? "destructive" : "outline",
+    },
+    {
+      actionId: "camera",
+      ariaKeyshortcuts:
+        appConfig.roomControls.shortcuts.bindings.camera.ariaKeyshortcuts,
+      className: cn(
+        "border-primary/50 px-6 font-mono uppercase tracking-wider transition-all duration-300",
+        localCameraStream
+          ? "border-destructive bg-destructive/20 text-destructive hover:bg-destructive/30"
+          : "text-primary hover:border-primary hover:bg-primary/10",
+      ),
+      disabled: cameraDisabled,
+      icon: localCameraStream ? <VideoIcon /> : <VideoOffIcon />,
+      isShortcutRevealActive,
+      label: cameraButtonLabel,
+      onPress: handleCameraAction,
+      shortcutKeys: getShortcutDisplayKeys("camera", shortcutPlatform),
+      variant: localCameraStream ? "destructive" : "outline",
     },
     {
       actionId: "screenShare",
@@ -264,7 +310,7 @@ export function VoiceRoom({
         </p>
         {isAfk && (
           <p className="mt-2 text-xs font-mono uppercase tracking-[0.2em] text-amber-300">
-            AFK: mic and room audio paused.
+            AFK: mic and room audio paused. Camera off.
           </p>
         )}
         {isOffline && (
@@ -288,6 +334,11 @@ export function VoiceRoom({
             {screenShareError}
           </p>
         )}
+        {cameraError && (
+          <p role="alert" className="mt-2 text-xs font-mono text-destructive">
+            {cameraError}
+          </p>
+        )}
         {screenShareNotice && (
           <p className="mt-2 text-xs font-mono text-primary/75">
             {screenShareNotice}
@@ -303,18 +354,35 @@ export function VoiceRoom({
         />
       )}
 
-      <div className="mb-12 flex max-w-md flex-wrap justify-center gap-6 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150 sm:gap-8">
-        {users.map((user) => (
-          <VoiceAvatar
-            key={user.id}
-            username={
-              user.id === selfUserId ? `${currentUser} (YOU)` : user.username
-            }
-            isSpeaking={user.isSpeaking}
-            isMuted={user.isMuted}
-            isAfk={user.isAfk}
-          />
-        ))}
+      <div className="mb-12 flex w-full max-w-5xl flex-wrap items-center justify-center gap-6 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150 sm:gap-8">
+        {users.map((user) =>
+          user.isCameraOn && !isAfk ? (
+            <CameraTile
+              key={user.id}
+              username={
+                user.id === selfUserId ? `${currentUser} (YOU)` : user.username
+              }
+              stream={
+                user.id === selfUserId
+                  ? localCameraStream
+                  : (remoteCameraStreams.get(user.id) ?? null)
+              }
+              isLocal={user.id === selfUserId}
+              isSpeaking={user.isSpeaking}
+              isMuted={user.isMuted}
+            />
+          ) : (
+            <VoiceAvatar
+              key={user.id}
+              username={
+                user.id === selfUserId ? `${currentUser} (YOU)` : user.username
+              }
+              isSpeaking={user.isSpeaking}
+              isMuted={user.isMuted}
+              isAfk={user.isAfk}
+            />
+          ),
+        )}
       </div>
 
       <TooltipProvider

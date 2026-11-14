@@ -25,6 +25,8 @@ const E2E_CLOUDFLARE_TURN_MOCK_ICE_SERVERS = JSON.stringify({
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
+  // All browser contexts share one server-side room, including across test files.
+  workers: 1,
   reporter: "line",
   use: {
     baseURL: `http://127.0.0.1:${E2E_PORT}`,

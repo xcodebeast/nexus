@@ -64,6 +64,7 @@ Compose reads local environment variables and wires the service to port `3000` b
 - Local RNNoise-based microphone denoising with automatic browser fallback
 - Single-presenter screen sharing with automatic takeover when another user starts presenting
 - Inline screen stage for local preview and remote viewing
+- Optional cameras with inline participant video and a mirrored local preview
 - Bun-native room session API and WebSocket signaling
 - Browser-to-browser audio transport over WebRTC
 - Clean disconnect flow to return to the intro screen
@@ -87,15 +88,27 @@ Compose reads local environment variables and wires the service to port `3000` b
 - **Sessions/Auth**: Bun HTTP routes at `/api/session`
 - **Presence/Signaling**: Bun native WebSockets at `/api/ws`
 - **Audio**: WebRTC peer mesh between connected browsers
+- **Camera**: A video transceiver bundled into each existing audio connection
 - **Screen Share**: Server-authoritative single presenter over a separate WebRTC video mesh channel
 
-WebSockets handle room state, presenter ownership, and WebRTC offer/answer/ICE exchange. Audio and screen video do not flow through the Bun server.
+WebSockets handle room state, presenter ownership, and WebRTC offer/answer/ICE exchange. Audio, camera video, and screen video do not flow through the Bun server (TURN may relay media when a direct connection is unavailable).
 
 Only one user can present at a time. If another user starts screen sharing, the current presenter is stopped automatically and the room switches to the new presenter.
 
 Microphone access requires a secure context in the browser. Use HTTPS in deployed environments, or `localhost` during development.
 When the browser supports AudioWorklet, Nexus denoises the outgoing mic stream locally before it is sent to peers. If RNNoise cannot start or the browser lacks support, Nexus falls back to browser DSP/pass-through without breaking the call.
 Screen sharing is optimized for desktop Chromium browsers in the current small-room peer-mesh architecture.
+
+### Lightweight cameras
+
+Use the camera control or **Ctrl+E** to turn your camera on or off. Cameras start off, and Nexus requests access only when you turn yours on. Camera tiles replace the animated avatars while video is enabled; microphone muting does not turn off video. AFK, disconnecting, or losing the signaling connection stops capture. Returning to the room leaves the camera off until you enable it again.
+
+- Capture is limited to **640×360 at 15 fps**, with a motion content hint and native browser codec selection. Nexus adds no video library, background effects, canvas processing, or simulcast encoders.
+- Camera video shares the audio connection's ICE/DTLS transport. A reserved video transceiver allows camera toggles through `replaceTrack()` without another peer connection or SDP renegotiation. Turning it off stops the device and detaches the sender track instead of sending black frames.
+- Each sender is limited to **300 kbps** of camera payload. A **600 kbps total payload budget per camera user** is divided among non-AFK viewers. At four or more viewers, outgoing resolution is also halved. The browser can reduce quality further under congestion; transport headers, retransmissions, and other media add to these limits.
+- Bandwidth limits are updated when viewers join, leave, or go AFK. Video has low sender priority, and screen sharing keeps its own independent stream.
+
+The mesh still needs a separate encoder and upload per viewer. The budget bounds the requested payload rate, but CPU use grows with room size. Nexus remains intended for small rooms; larger video rooms would need an SFU to forward a single upload. These defaults favor small conversational tiles over HD video.
 
 ## PWA Support
 

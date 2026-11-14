@@ -669,6 +669,7 @@ const server = serve<SocketData>({
         isAfk: false,
         isMuted: false,
         isSpeaking: false,
+        isCameraOn: false,
         connectedAt: Date.now(),
       };
 
@@ -716,6 +717,7 @@ const server = serve<SocketData>({
           isMuted: event.isAfk ? true : event.isMuted,
           isSpeaking:
             event.isAfk || event.isMuted ? false : event.isSpeaking,
+          isCameraOn: !event.isAfk && event.isCameraOn === true,
         };
 
         participants.set(session.id, nextParticipant);

@@ -3,6 +3,7 @@ export type ShortcutPlatform = "mac" | "default";
 export type RoomShortcutActionId =
   | "mute"
   | "afk"
+  | "camera"
   | "screenShare"
   | "disconnect";
 
@@ -87,7 +88,7 @@ type Config = {
   version: `${number}.${number}.${number}`;
 };
 
-const appVersion = "1.5.0" as const;
+const appVersion = "1.6.0" as const;
 
 export const appConfig = {
   appName: "NEXUS",
@@ -129,6 +130,11 @@ export const appConfig = {
           key: "f",
           displayKey: "F",
           ariaKeyshortcuts: "Control+F",
+        },
+        camera: {
+          key: "e",
+          displayKey: "E",
+          ariaKeyshortcuts: "Control+E",
         },
         screenShare: {
           key: "s",

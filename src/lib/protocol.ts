@@ -15,6 +15,7 @@ export interface RoomUser {
   isAfk: boolean;
   isMuted: boolean;
   isSpeaking: boolean;
+  isCameraOn: boolean;
   connectedAt: number;
 }
 
@@ -60,6 +61,7 @@ export type ClientEvent =
       isMuted: boolean;
       isSpeaking: boolean;
       isAfk: boolean;
+      isCameraOn: boolean;
     }
   | {
       type: "screen-share:start";

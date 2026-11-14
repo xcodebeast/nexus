@@ -2,6 +2,87 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 import { appConfig } from "../src/lib/config";
 import type { NotificationCue } from "../src/lib/audio/notification-sounds";
 
+interface CameraHarness {
+  requests: number;
+  offers: number;
+  tracks: MediaStreamTrack[];
+  defer: boolean;
+  deny: boolean;
+  resolve: (() => void) | null;
+}
+
+declare global {
+  interface Window {
+    __nexusCamera: CameraHarness;
+    __nexusPeerConnections: RTCPeerConnection[];
+  }
+}
+
+function installCameraHarness() {
+  const state: CameraHarness = {
+    requests: 0,
+    offers: 0,
+    tracks: [],
+    defer: false,
+    deny: false,
+    resolve: null,
+  };
+  window.__nexusCamera = state;
+  const getUserMedia = navigator.mediaDevices.getUserMedia.bind(
+    navigator.mediaDevices,
+  );
+  navigator.mediaDevices.getUserMedia = async (constraints) => {
+    if (!constraints?.video) return getUserMedia(constraints);
+    state.requests += 1;
+    if (state.deny) throw new DOMException("Denied", "NotAllowedError");
+    if (state.defer)
+      await new Promise<void>((resolve) => {
+        state.resolve = resolve;
+      });
+    const stream = await getUserMedia(constraints);
+    state.tracks.push(...stream.getVideoTracks());
+    return stream;
+  };
+  const createOffer = RTCPeerConnection.prototype.createOffer;
+  RTCPeerConnection.prototype.createOffer = new Proxy(createOffer, {
+    apply(target, receiver, args) {
+      state.offers += 1;
+      return Reflect.apply(target, receiver, args);
+    },
+  });
+}
+
+async function expectCameraPlaying(page: Page, username: string) {
+  const video = page.getByLabel(`${username} camera`, { exact: true });
+  await expect(video).toBeVisible();
+  await expect
+    .poll(() =>
+      video.evaluate(
+        (element: HTMLVideoElement) =>
+          element.videoWidth > 0 &&
+          !element.paused &&
+          element.getVideoPlaybackQuality().totalVideoFrames > 1,
+      ),
+    )
+    .toBe(true);
+}
+
+async function getCameraSenders(page: Page) {
+  return page.evaluate(() =>
+    window.__nexusPeerConnections
+      .filter((peer) => peer.connectionState !== "closed")
+      .flatMap((peer) =>
+        peer
+          .getTransceivers()
+          .filter((entry) => entry.receiver.track.kind === "video")
+          .map(({ sender }) => ({
+            trackState: sender.track?.readyState ?? null,
+            encoding: sender.getParameters().encodings[0],
+          })),
+      ),
+  );
+}
+
 type InitScript = () => void;
 
 function escapeRegExp(value: string) {
@@ -13,7 +94,7 @@ async function createVoiceContext(
   initScripts: InitScript[] = [],
 ) {
   const context = await browser.newContext({
-    permissions: ["microphone"],
+    permissions: ["microphone", "camera"],
   });
 
   for (const initScript of initScripts) {
@@ -887,6 +968,353 @@ function installScreenShareMocks() {
     },
   });
 }
+
+test("camera sends real video both ways without new peers or renegotiation", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installPeerTracker,
+    installCameraHarness,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installPeerTracker,
+    installCameraHarness,
+  ]);
+  const alice = await aliceContext.newPage();
+  const bob = await bobContext.newPage();
+  try {
+    await login(alice, "Alice");
+    await login(bob, "Bob");
+    await expectRemoteAudioPlaying(alice);
+    await expectRemoteAudioPlaying(bob);
+    const before = await Promise.all(
+      [alice, bob].map((page) =>
+        page.evaluate(() => ({
+          peers: window.__nexusPeerConnections.length,
+          offers: window.__nexusCamera.offers,
+          requests: window.__nexusCamera.requests,
+        })),
+      ),
+    );
+    expect(
+      before.every((entry) => entry.peers === 1 && entry.requests === 0),
+    ).toBe(true);
+
+    await alice
+      .getByRole("button", { name: "Turn camera on", exact: true })
+      .click();
+    await bob
+      .getByRole("button", { name: "Turn camera on", exact: true })
+      .click();
+    await expectCameraPlaying(alice, "Alice (YOU)");
+    await expectCameraPlaying(bob, "Alice");
+    await expectCameraPlaying(alice, "Bob");
+    await expectCameraPlaying(bob, "Bob (YOU)");
+    for (const page of [alice, bob]) {
+      const senders = await getCameraSenders(page);
+      expect(senders).toHaveLength(1);
+      expect(senders[0]?.encoding).toMatchObject({
+        maxBitrate: 300_000,
+        maxFramerate: 15,
+      });
+      const settings = await page.evaluate(() =>
+        window.__nexusCamera.tracks[0]!.getSettings(),
+      );
+      expect(settings.width).toBeLessThanOrEqual(640);
+      expect(settings.height).toBeLessThanOrEqual(360);
+      expect(settings.frameRate).toBeLessThanOrEqual(15);
+    }
+
+    await alice
+      .getByRole("button", { name: "Mute microphone", exact: true })
+      .click();
+    await expectCameraPlaying(bob, "Alice");
+    await alice
+      .getByRole("button", { name: "Turn camera off", exact: true })
+      .click();
+    await expect(bob.getByLabel("Alice camera", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect
+      .poll(() =>
+        alice.evaluate(() => window.__nexusCamera.tracks[0]?.readyState),
+      )
+      .toBe("ended");
+    await expect
+      .poll(() => getCameraSenders(alice))
+      .toMatchObject([{ trackState: null }]);
+    await alice.getByTestId("room-control-camera").focus();
+    await alice.keyboard.press("Control+e");
+    await expectCameraPlaying(bob, "Alice");
+    await expectRemoteAudioPlaying(bob);
+    const after = await Promise.all(
+      [alice, bob].map((page) =>
+        page.evaluate(() => ({
+          peers: window.__nexusPeerConnections.length,
+          offers: window.__nexusCamera.offers,
+        })),
+      ),
+    );
+    expect(after).toEqual(
+      before.map(({ peers, offers }) => ({ peers, offers })),
+    );
+  } finally {
+    await aliceContext.close();
+    await bobContext.close();
+  }
+});
+
+test("camera connects late viewers and reallocates bandwidth on AFK and leave", async ({
+  browser,
+}) => {
+  test.setTimeout(60_000);
+  const contexts = await Promise.all(
+    Array.from({ length: 4 }, () =>
+      createVoiceContext(browser, [installPeerTracker, installCameraHarness]),
+    ),
+  );
+  try {
+    const pages = await Promise.all(
+      contexts.map((context) => context.newPage()),
+    );
+    const alice = pages[0]!;
+    await login(alice, "Alice");
+    await alice
+      .getByRole("button", { name: "Turn camera on", exact: true })
+      .click();
+    await expectCameraPlaying(alice, "Alice (YOU)");
+    for (const [index, page] of pages.slice(1).entries()) {
+      await login(page, `Viewer ${index + 1}`);
+      await expectCameraPlaying(page, "Alice");
+    }
+    await expect
+      .poll(async () =>
+        (await getCameraSenders(alice)).map(
+          (sender) => sender.encoding?.maxBitrate,
+        ),
+      )
+      .toEqual([200_000, 200_000, 200_000]);
+    await pages[1]!
+      .getByRole("button", { name: "Go AFK", exact: true })
+      .click();
+    await expect(
+      pages[1]!.getByLabel("Alice camera", { exact: true }),
+    ).toHaveCount(0);
+    await expect
+      .poll(async () =>
+        (await getCameraSenders(alice)).map(
+          (sender) => sender.encoding?.maxBitrate,
+        ),
+      )
+      .toEqual([300_000, 300_000]);
+    await pages[1]!
+      .getByRole("button", { name: "Return from AFK", exact: true })
+      .click();
+    await expectCameraPlaying(pages[1]!, "Alice");
+    await expect
+      .poll(async () =>
+        (await getCameraSenders(alice)).map(
+          (sender) => sender.encoding?.maxBitrate,
+        ),
+      )
+      .toEqual([200_000, 200_000, 200_000]);
+    await pages[3]!
+      .getByRole("button", { name: "Disconnect", exact: true })
+      .click();
+    await expect
+      .poll(async () =>
+        (await getCameraSenders(alice)).map(
+          (sender) => sender.encoding?.maxBitrate,
+        ),
+      )
+      .toEqual([300_000, 300_000]);
+    await alice.getByRole("button", { name: "Go AFK", exact: true }).click();
+    await expect
+      .poll(() =>
+        alice.evaluate(() => window.__nexusCamera.tracks[0]?.readyState),
+      )
+      .toBe("ended");
+    await alice
+      .getByRole("button", { name: "Return from AFK", exact: true })
+      .click();
+    await expect(
+      alice.getByRole("button", { name: "Turn camera on", exact: true }),
+    ).toBeEnabled();
+    await expect(alice.getByTestId("camera-video")).toHaveCount(0);
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()));
+  }
+});
+
+test("camera permission failure leaves voice connected and allows retry", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser, [installCameraHarness]);
+  const page = await context.newPage();
+  try {
+    await login(page, "Alice");
+    await page.evaluate(() => {
+      window.__nexusCamera.deny = true;
+    });
+    await page
+      .getByRole("button", { name: "Turn camera on", exact: true })
+      .click();
+    await expect(page.getByRole("alert")).toContainText(
+      "Camera access was denied",
+    );
+    await expect(page.getByText(/Voice channel active/)).toBeVisible();
+    await page.evaluate(() => {
+      window.__nexusCamera.deny = false;
+    });
+    await page
+      .getByRole("button", { name: "Turn camera on", exact: true })
+      .click();
+    await expectCameraPlaying(page, "Alice (YOU)");
+  } finally {
+    await context.close();
+  }
+});
+
+for (const action of ["cancel", "afk", "disconnect", "reconnect"] as const) {
+  test(`camera discards a permission result after ${action}`, async ({
+    browser,
+  }) => {
+    const context = await createVoiceContext(browser, [
+      installCameraHarness,
+      installWebSocketTracker,
+    ]);
+    const page = await context.newPage();
+    try {
+      await login(page, "Alice");
+      await expect(
+        page.getByRole("button", { name: "Turn camera on", exact: true }),
+      ).toBeEnabled();
+      await page.evaluate(() => {
+        window.__nexusCamera.defer = true;
+      });
+      await page
+        .getByRole("button", { name: "Turn camera on", exact: true })
+        .click();
+      await expect
+        .poll(() => page.evaluate(() => Boolean(window.__nexusCamera.resolve)))
+        .toBe(true);
+      if (action === "cancel")
+        await page
+          .getByRole("button", { name: "Cancel camera request" })
+          .click();
+      if (action === "afk")
+        await page.getByRole("button", { name: "Go AFK", exact: true }).click();
+      if (action === "disconnect")
+        await page
+          .getByRole("button", { name: "Disconnect", exact: true })
+          .click();
+      if (action === "reconnect") {
+        await page.evaluate(() => {
+          const socket = (
+            window as Window & { __nexusSockets?: WebSocket[] }
+          ).__nexusSockets?.find(
+            (candidate) =>
+              candidate.url.includes("/api/ws") &&
+              candidate.readyState === WebSocket.OPEN,
+          );
+          if (!socket) throw new Error("Missing room websocket");
+          socket.close(4005, "Simulated realtime drop");
+        });
+        await expect(
+          page.getByText(/Restoring realtime channel/),
+        ).toBeVisible();
+      }
+      await page.evaluate(() => window.__nexusCamera.resolve?.());
+      await expect
+        .poll(() =>
+          page.evaluate(() => window.__nexusCamera.tracks[0]?.readyState),
+        )
+        .toBe("ended");
+      await expect(page.getByTestId("camera-video")).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+test("camera stops capture and clears the local tile when signaling drops", async ({
+  browser,
+}) => {
+  const context = await createVoiceContext(browser, [
+    installCameraHarness,
+    installWebSocketTracker,
+  ]);
+  const page = await context.newPage();
+  try {
+    await login(page, "Alice");
+    await page
+      .getByRole("button", { name: "Turn camera on", exact: true })
+      .click();
+    await expectCameraPlaying(page, "Alice (YOU)");
+    await page.evaluate(() => {
+      const socket = (
+        window as Window & { __nexusSockets?: WebSocket[] }
+      ).__nexusSockets?.find(
+        (candidate) =>
+          candidate.url.includes("/api/ws") &&
+          candidate.readyState === WebSocket.OPEN,
+      );
+      if (!socket) throw new Error("Missing room websocket");
+      socket.close(4005, "Simulated realtime drop");
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.__nexusCamera.tracks[0]?.readyState),
+      )
+      .toBe("ended");
+    await expect(page.getByTestId("camera-video")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Turn camera on", exact: true }),
+    ).toBeEnabled();
+    expect(await page.evaluate(() => window.__nexusCamera.requests)).toBe(1);
+  } finally {
+    await context.close();
+  }
+});
+
+test("camera coexists with screen sharing and stops when the device ends capture", async ({
+  browser,
+}) => {
+  const aliceContext = await createVoiceContext(browser, [
+    installCameraHarness,
+    installScreenShareMocks,
+  ]);
+  const bobContext = await createVoiceContext(browser, [
+    installCameraHarness,
+    installScreenShareMocks,
+  ]);
+  const alice = await aliceContext.newPage();
+  const bob = await bobContext.newPage();
+  try {
+    await login(alice, "Alice");
+    await login(bob, "Bob");
+    await alice
+      .getByRole("button", { name: "Turn camera on", exact: true })
+      .click();
+    await expectCameraPlaying(bob, "Alice");
+    await clickScreenShare(alice);
+    await expectScreenStageVideo(bob, "Alice");
+    await expectCameraPlaying(bob, "Alice");
+    await alice.evaluate(() => {
+      const track = window.__nexusCamera.tracks[0]!;
+      track.stop();
+      track.dispatchEvent(new Event("ended"));
+    });
+    await expect(bob.getByLabel("Alice camera", { exact: true })).toHaveCount(
+      0,
+    );
+    await expectScreenStageVideo(bob, "Alice");
+    await expectRemoteAudioPlaying(bob);
+  } finally {
+    await aliceContext.close();
+    await bobContext.close();
+  }
+});
 
 test("skips the dedicated intro after the first visit", async ({ browser }) => {
   const context = await createVoiceContext(browser);
